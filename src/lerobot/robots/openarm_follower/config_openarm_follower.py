@@ -28,7 +28,8 @@ LEFT_DEFAULT_JOINTS_LIMITS: dict[str, tuple[float, float]] = {
     "joint_5": (-85.0, 85.0),
     "joint_6": (-40.0, 40.0),
     "joint_7": (-80.0, 80.0),
-    "gripper": (-65.0, 0.0),
+    # OpenArm v2 grippers are mirrored: the left opens toward +65°, the right toward -65°.
+    "gripper": (0.0, 65.0),
 }
 
 RIGHT_DEFAULT_JOINTS_LIMITS: dict[str, tuple[float, float]] = {

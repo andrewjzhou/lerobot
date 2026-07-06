@@ -54,3 +54,36 @@ pre-commit run --all-files                           # Lint + format (ruff, typo
 - **Optional dependencies**: many policies, envs, and robots are behind extras (e.g., `lerobot[aloha]`). New imports for optional packages must be guarded or lazy. See `pyproject.toml [project.optional-dependencies]`.
 - **Video decoding**: datasets can store observations as video files. `LeRobotDataset` handles frame extraction, but tests need ffmpeg installed.
 - **Prioritize use of `uv run`** to execute Python commands (not raw `python` or `pip`).
+
+## Local Fork Notes: OpenArm v2 Support (July 2026)
+
+This fork adapts the OpenArm Mini teleoperator and OpenArm follower to **OpenArm v2**
+hardware (upstream code targets v1). Setup: bimanual OpenArm v2 followers (Damiao
+motors, CAN FD via `can0`=right / `can1`=left) teleoperated by two OpenArm Mini
+leaders (Feetech STS3215, USB serial).
+
+### v2 hardware differences discovered (and patched)
+
+- **Mirrored grippers**: on v2 the left gripper opens toward **+65°** and the right
+  toward **-65°** (v1 opened both toward -65°). Patched:
+  - `src/lerobot/teleoperators/openarm_mini/openarm_mini.py` — per-side gripper
+    scale (`GRIPPER_TELEOP_TO_DEGREES_LEFT = +0.65`); squeeze = 0° = closed on both sides.
+  - `src/lerobot/robots/openarm_follower/config_openarm_follower.py` —
+    `LEFT_DEFAULT_JOINTS_LIMITS["gripper"] = (0.0, 65.0)`.
+- **Wrist axes correspond directly** on v2: removed the v1 leader joint 6 ↔ follower
+  joint 7 cross-remap (`JOINT_REMAP` now empty) and inverted joint_6's direction in
+  `SIDE_MOTORS_TO_FLIP` on both sides.
+
+### Hardware/calibration state (not in git)
+
+- Left follower gripper motor was re-zeroed (Damiao set-zero, persists in motor
+  flash) so **closed = 0°, open ≈ +76°** — the v2 stock convention matching the
+  patched code. If that motor is ever re-zeroed, zero it at the fully closed jaw.
+- Leader calibration files (`~/.cache/huggingface/lerobot/calibration/`) are stock
+  output of `lerobot-calibrate`; no hand edits required by this fork.
+- Note: the follower gripper motors respond on their ESC/MST CAN IDs but ignore the
+  0x7FF param channel (refresh/param queries) — reads rely on MIT-command feedback,
+  so occasional "Packet drop: gripper" warnings at startup are expected and benign.
+- A gripper commanded outside its physical range stalls against its end stop and can
+  sag the 24V rail until motors trip (blinking LED = latched fault; clear by power
+  cycle). The patches above make that unreachable in normal teleop.

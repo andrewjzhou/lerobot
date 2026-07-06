@@ -33,14 +33,18 @@ logger = logging.getLogger(__name__)
 
 # Per-side motor direction flips applied during readout.
 SIDE_MOTORS_TO_FLIP: dict[str, list[str]] = {
-    "left": ["joint_1", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7"],
-    "right": ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_7"],
+    "left": ["joint_1", "joint_3", "joint_4", "joint_5", "joint_7"],
+    "right": ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7"],
 }
 
-# Leader joint 6 ↔ follower joint 7 (symmetric — its own inverse).
-JOINT_REMAP = {"joint_6": "joint_7", "joint_7": "joint_6"}
+# On OpenArm v1 the leader's joint 6 ↔ follower's joint 7 were crossed:
+# JOINT_REMAP = {"joint_6": "joint_7", "joint_7": "joint_6"}
+# On OpenArm v2 the wrist axes correspond directly — no remap.
+JOINT_REMAP: dict[str, str] = {}
 
+# OpenArm v2 grippers are mirrored: the right opens toward -65°, the left toward +65°.
 GRIPPER_TELEOP_TO_DEGREES = -0.65
+GRIPPER_TELEOP_TO_DEGREES_LEFT = 0.65
 
 
 class OpenArmMini(Teleoperator):
@@ -59,6 +63,9 @@ class OpenArmMini(Teleoperator):
         if config.side is not None and config.side not in SIDE_MOTORS_TO_FLIP:
             raise ValueError(f"Invalid side '{config.side}'; expected 'left', 'right', or None.")
         self._motors_to_flip: list[str] = SIDE_MOTORS_TO_FLIP.get(config.side, []) if config.side else []
+        self._gripper_scale = (
+            GRIPPER_TELEOP_TO_DEGREES_LEFT if config.side == "left" else GRIPPER_TELEOP_TO_DEGREES
+        )
 
         norm_mode_body = MotorNormMode.DEGREES
         motors = {
@@ -225,8 +232,9 @@ class OpenArmMini(Teleoperator):
         for motor, val in positions.items():
             target = JOINT_REMAP.get(motor, motor)
             if motor == "gripper":
-                # Convert gripper from teleop 0-100 to openarms degrees: 0→0°, 100→-65°
-                action[f"{target}.pos"] = val * GRIPPER_TELEOP_TO_DEGREES
+                # Convert gripper from teleop 0-100 to openarms degrees: 0→0° (closed),
+                # 100→-65° on the right / +65° on the left (v2 grippers are mirrored).
+                action[f"{target}.pos"] = val * self._gripper_scale
             else:
                 action[f"{target}.pos"] = -val if motor in self._motors_to_flip else val
 
@@ -250,8 +258,8 @@ class OpenArmMini(Teleoperator):
             # JOINT_REMAP is symmetric (its own inverse).
             target = JOINT_REMAP.get(base, base)
             if base == "gripper":
-                # Convert robot degrees to teleop 0-100: 0°→0, -65°→100
-                goals[target] = val / GRIPPER_TELEOP_TO_DEGREES
+                # Convert robot degrees to teleop 0-100: 0°→0 (closed), ±65°→100 (open)
+                goals[target] = val / self._gripper_scale
             else:
                 # Un-flip using the ORIGINAL motor name (target = leader motor)
                 goals[target] = -val if target in self._motors_to_flip else val
