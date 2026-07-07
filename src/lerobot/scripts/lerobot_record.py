@@ -133,6 +133,7 @@ from lerobot.robots import (  # noqa: F401
     so_follower,
     unitree_g1 as unitree_g1_robot,
 )
+from lerobot.robots.utils import smooth_sync_to_leader
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
     TeleoperatorConfig,
@@ -441,6 +442,9 @@ def record(
         robot.connect()
         if teleop is not None:
             teleop.connect()
+            # Ease the follower onto the leader's pose instead of snapping on
+            # the first control cycle.
+            smooth_sync_to_leader(robot, teleop, fps=cfg.dataset.fps)
 
         listener, events = init_keyboard_listener()
 

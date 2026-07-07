@@ -102,7 +102,10 @@ class OpenArmMini(Teleoperator):
         logger.info(f"Connecting arm on {self.config.port}...")
         self.bus.connect()
 
-        if calibrate:
+        # Only calibrate when the motor registers don't match the calibration
+        # file (same gating as the follower and upstream so/koch leaders) —
+        # avoids the interactive "Press ENTER" prompt on every connect.
+        if not self.is_calibrated and calibrate:
             self.calibrate()
 
         self.configure()

@@ -105,6 +105,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so_leader,
     unitree_g1,
 )
+from lerobot.robots.utils import smooth_sync_to_leader
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging, move_cursor_up
@@ -228,6 +229,9 @@ def teleoperate(cfg: TeleoperateConfig):
 
     teleop.connect()
     robot.connect()
+    # Ease the follower onto the leader's pose instead of snapping on the
+    # first control cycle.
+    smooth_sync_to_leader(robot, teleop, fps=cfg.fps)
 
     try:
         teleop_loop(

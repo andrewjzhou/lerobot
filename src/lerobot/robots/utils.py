@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import time
 from pprint import pformat
 from typing import cast
 
@@ -85,6 +86,38 @@ def make_robot_from_config(config: RobotConfig) -> Robot:
             return cast(Robot, make_device_from_device_class(config))
         except Exception as e:
             raise ValueError(f"Error creating robot with config {config}: {e}") from e
+
+
+def smooth_sync_to_leader(robot, teleop, fps: int = 30, duration_s: float = 2.0) -> None:
+    """Ease the follower onto the leader's pose before teleoperation starts.
+
+    Without this, the first control cycle commands the full leader target in
+    one step and the follower snaps violently (position control, high kp).
+    Interpolates from the follower's present position to the leader's action
+    with a smoothstep profile, re-reading the leader every tick so the motion
+    converges on wherever the leader actually is when the ramp ends.
+
+    Duck-typed: works for single-arm and bimanual pairs alike since their
+    action/observation dicts share ``<motor>.pos`` keys (``left_``/``right_``
+    prefixed in the bimanual case). No-ops if the key sets don't intersect.
+    """
+    from lerobot.utils.robot_utils import precise_sleep
+
+    start = {k: v for k, v in robot.get_observation().items() if k.endswith(".pos")}
+    if not any(k in start for k in teleop.get_action()):
+        return
+
+    logging.info(f"Syncing follower to leader pose over {duration_s}s...")
+    num_steps = max(1, round(duration_s * fps))
+    for step in range(1, num_steps + 1):
+        t_start = time.perf_counter()
+        target = teleop.get_action()
+        a = step / num_steps
+        alpha = a * a * (3 - 2 * a)  # smoothstep: zero velocity at both ends
+        robot.send_action(
+            {k: start[k] * (1 - alpha) + target[k] * alpha for k in start if k in target}
+        )
+        precise_sleep(max(1 / fps - (time.perf_counter() - t_start), 0.0))
 
 
 # TODO(pepijn): Move to pipeline step to make sure we don't have to do this in the robot code and send action to robot is clean for use in dataset
