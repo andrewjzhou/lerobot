@@ -248,10 +248,16 @@ def teleoperate(cfg: TeleoperateConfig):
     except KeyboardInterrupt:
         pass
     finally:
-        if cfg.display_data:
-            shutdown_rerun()
-        teleop.disconnect()
-        robot.disconnect()
+        # Disconnect the robot FIRST (torque release), then flush rerun:
+        # shutdown_rerun() can block for a long time flushing its backlog, and
+        # a second Ctrl-C there used to skip the disconnects entirely, leaving
+        # the follower motors enabled and the arms locked in place.
+        try:
+            robot.disconnect()
+            teleop.disconnect()
+        finally:
+            if cfg.display_data:
+                shutdown_rerun()
 
 
 def main():

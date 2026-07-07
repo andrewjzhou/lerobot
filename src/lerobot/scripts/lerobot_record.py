@@ -504,13 +504,18 @@ def record(
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
 
-        if dataset:
-            dataset.finalize()
-
-        if robot.is_connected:
-            robot.disconnect()
-        if teleop and teleop.is_connected:
-            teleop.disconnect()
+        # Disconnect the robot FIRST (this is the torque-release path): if it
+        # ran after dataset.finalize() and finalization raised or was
+        # interrupted (Ctrl-C), the motors would be left enabled, actively
+        # holding position, with the operator unable to move the arms.
+        try:
+            if robot.is_connected:
+                robot.disconnect()
+            if teleop and teleop.is_connected:
+                teleop.disconnect()
+        finally:
+            if dataset:
+                dataset.finalize()
 
         if not is_headless() and listener:
             listener.stop()

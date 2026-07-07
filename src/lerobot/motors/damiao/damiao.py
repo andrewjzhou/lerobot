@@ -259,6 +259,24 @@ class DamiaoMotorsBus(MotorsBusBase):
         if disable_torque:
             try:
                 self.disable_torque()
+                # A DISABLE frame can be dropped silently (1 ms ACK window, no
+                # retry), leaving that motor powered and the arm locked in
+                # place after the program exits. Verify via the status nibble
+                # each motor reports in its refresh reply, and retry stragglers.
+                still_enabled, silent = self._check_torque_status()
+                if still_enabled:
+                    self.disable_torque(motors=still_enabled, num_retry=2)
+                    still_enabled, silent_retry = self._check_torque_status(still_enabled)
+                    silent = sorted(set(silent) | set(silent_retry))
+                if still_enabled:
+                    logger.warning(
+                        f"Motors still report torque ENABLED after disconnect: {still_enabled}. "
+                        "Power-cycle the arm or run `openarm-can-cli disable` to release them."
+                    )
+                if silent:
+                    logger.warning(
+                        f"No status reply from motors during disconnect: {silent}; torque state unknown."
+                    )
             except Exception as e:
                 logger.warning(f"Failed to disable torque during disconnect: {e}")
 
@@ -318,6 +336,39 @@ class DamiaoMotorsBus(MotorsBusBase):
                     if _ == num_retry:
                         raise e
                     time.sleep(MEDIUM_TIMEOUT_SEC)
+
+    def _check_torque_status(
+        self, motors: str | list[str] | None = None
+    ) -> tuple[list[str], list[str]]:
+        """Query each motor's torque state via the status nibble of its refresh reply.
+
+        Damiao motors report their state in the upper nibble of byte 0 of every
+        reply (0 = disabled, 1 = enabled, >=8 = fault states).
+
+        Returns:
+            (enabled, silent): motor names still reporting torque enabled, and
+            motor names that did not reply at all (state unknown).
+        """
+        enabled, silent = [], []
+        for motor in self._get_motors_list(motors):
+            name = self._get_motor_name(motor)
+            msg = can.Message(
+                arbitration_id=self._get_motor_id(motor),
+                data=[0xFF] * 7 + [CAN_CMD_REFRESH],
+                is_extended_id=False,
+                is_fd=self.use_can_fd,
+            )
+            if self.canbus is None:
+                raise RuntimeError("CAN bus is not initialized.")
+            self.canbus.send(msg)
+            reply = self._recv_motor_response(
+                expected_recv_id=self._get_motor_recv_id(motor), timeout=0.02
+            )
+            if reply is None:
+                silent.append(name)
+            elif (reply.data[0] >> 4) == 0x1:
+                enabled.append(name)
+        return enabled, silent
 
     @contextmanager
     def torque_disabled(self, motors: str | list[str] | None = None):
