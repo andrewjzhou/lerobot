@@ -240,10 +240,13 @@ class OpenArmFollower(Robot):
                 obs_dict[f"{motor}.vel"] = state.get("velocity", 0.0)
                 obs_dict[f"{motor}.torque"] = state.get("torque", 0.0)
 
-        # Capture images from cameras
+        # Capture images from cameras. Tolerate up to 1s of frame staleness:
+        # transient USB error bursts (e.g. motor EMI hitting all cameras at
+        # once) can stall a camera past the default 500ms and would otherwise
+        # abort the whole teleop/record session.
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
-            obs_dict[cam_key] = cam.read_latest()
+            obs_dict[cam_key] = cam.read_latest(max_age_ms=1000)
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 
