@@ -73,8 +73,19 @@ leaders (Feetech STS3215, USB serial).
 - **Wrist axes correspond directly** on v2: removed the v1 leader joint 6 ↔ follower
   joint 7 cross-remap (`JOINT_REMAP` now empty) and inverted joint_6's direction in
   `SIDE_MOTORS_TO_FLIP` on both sides.
-
-### Hardware/calibration state (not in git)
+- **No re-zero at connect** (2026-07-08): upstream's `OpenArmFollower.connect()`
+  called `bus.set_zero_position()` on every connect, re-anchoring the coordinate
+  frame to the arm's hand-placed startup pose and overwriting the persistent
+  jig-calibrated zero. Damiao dual encoders are output-shaft absolute across
+  power cycles, so this was unnecessary and harmful (session-to-session frame
+  jitter; silently shifted joint limits; clobbered the gripper zero convention).
+  Commented out in `src/lerobot/robots/openarm_follower/openarm_follower.py`
+  `connect()` — zero is set ONLY via explicit calibration (`lerobot-calibrate`
+  or `openarm-can-cli set_zero` with the jig). **Revert**: uncomment the two
+  lines at that site. Note `openarm_leader` (full-size Damiao leader, unused in
+  this cell) still has the upstream connect-time re-zero. Datasets recorded
+  before this date were anchored per-session; the frames differ from jig zero
+  by each session's placement error (small).
 
 - Left follower gripper motor was re-zeroed (Damiao set-zero, persists in motor
   flash) so **closed = 0°, open ≈ +76°** — the v2 stock convention matching the

@@ -145,8 +145,16 @@ class OpenArmFollower(Robot):
 
         self.configure()
 
-        if self.is_calibrated:
-            self.bus.set_zero_position()
+        # OpenArm v2 fork (2026-07-08): do NOT re-zero at connect. Upstream
+        # re-anchored the coordinate frame to the arm's startup pose on every
+        # connect, silently overwriting the persistent jig-calibrated zero.
+        # Damiao motors have output-shaft-absolute dual encoders that retain
+        # position across power cycles, so the stored zero is trustworthy.
+        # Zero is now set ONLY by the explicit calibration flows (this class's
+        # calibrate(), or `openarm-can-cli set_zero` with the jig).
+        # To revert to upstream behavior, uncomment:
+        # if self.is_calibrated:
+        #     self.bus.set_zero_position()
 
         self.bus.enable_torque()
 
