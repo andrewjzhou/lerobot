@@ -182,6 +182,10 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    # Keep teleoperating the follower during the reset phase between episodes
+    # (drop the object, pre-position for the next episode). Set false to
+    # freeze the follower during resets instead.
+    teleop_during_reset: bool = True
 
     def __post_init__(self):
         if self.teleop is None:
@@ -486,7 +490,7 @@ def record(
                         teleop_action_processor=teleop_action_processor,
                         robot_action_processor=robot_action_processor,
                         robot_observation_processor=robot_observation_processor,
-                        teleop=teleop,
+                        teleop=teleop if cfg.teleop_during_reset else None,
                         control_time_s=cfg.dataset.reset_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
