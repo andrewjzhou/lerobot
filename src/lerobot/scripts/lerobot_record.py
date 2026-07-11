@@ -97,6 +97,7 @@ from lerobot.cameras.reachy2_camera import Reachy2CameraConfig  # noqa: F401
 from lerobot.cameras.realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.cameras.zmq import ZMQCameraConfig  # noqa: F401
 from lerobot.common.control_utils import (
+    follower_smooth_move_to,
     init_keyboard_listener,
     is_headless,
     sanity_check_dataset_robot_compatibility,
@@ -186,6 +187,11 @@ class RecordConfig:
     # (drop the object, pre-position for the next episode). Set false to
     # freeze the follower during resets instead.
     teleop_during_reset: bool = True
+    # Optional yaml with 'shutdown_1'/'shutdown_2' waypoint poses (degrees,
+    # {name: {side: {joint_1.pos: ..., gripper.pos: ...}}}). On exit the
+    # follower(s) retreat through them BEFORE torque-off, so the arms don't
+    # fall onto the workspace when the motors release.
+    shutdown_poses_file: str | None = None
 
     def __post_init__(self):
         if self.teleop is None:
@@ -223,6 +229,44 @@ class RecordConfig:
 
 
 @safe_stop_image_writer
+
+
+def _retreat_to_shutdown_poses(robot, poses_file: str) -> None:
+    """Replay shutdown_1 -> shutdown_2 waypoints (joint splines) before
+    torque-off. Handles bimanual (left_/right_-prefixed keys) and single-arm
+    robots; a side without a saved pose holds its current position."""
+    import yaml
+
+    poses = yaml.safe_load(open(poses_file))
+    obs = {k: v for k, v in robot.get_observation().items() if k.endswith(".pos")}
+    bimanual = any(k.startswith(("left_", "right_")) for k in obs)
+    sides = ["left", "right"] if bimanual else [getattr(robot.config, "side", "left")]
+    prefix = (lambda side, k: f"{side}_{k}") if bimanual else (lambda side, k: k)
+
+    waypoints = []
+    prev = dict(obs)
+    for name in ("shutdown_1", "shutdown_2"):
+        wp = dict(prev)
+        for side in sides:
+            saved = poses.get(name, {}).get(side)
+            if saved is None:
+                continue
+            for k, v in saved.items():
+                key = prefix(side, k)
+                if key in wp:
+                    wp[key] = v
+        waypoints.append(wp)
+        prev = wp
+    rest = waypoints[-1]
+    already = max(abs(obs[k] - rest[k]) for k in rest if not k.endswith("gripper.pos"))
+    if already < 5.0:
+        return
+    logging.info("Retreating to shutdown poses before torque-off...")
+    prev = obs
+    for wp, dur in zip(waypoints, (3.0, 2.5)):
+        follower_smooth_move_to(robot, prev, wp, duration_s=dur)
+        prev = wp
+
 def record_loop(
     robot: Robot,
     events: dict,
@@ -513,6 +557,11 @@ def record(
         # interrupted (Ctrl-C), the motors would be left enabled, actively
         # holding position, with the operator unable to move the arms.
         try:
+            if robot.is_connected and cfg.shutdown_poses_file:
+                try:
+                    _retreat_to_shutdown_poses(robot, cfg.shutdown_poses_file)
+                except Exception as e:
+                    logging.warning(f"shutdown-pose retreat failed ({e}); releasing torque in place")
             if robot.is_connected:
                 robot.disconnect()
             if teleop and teleop.is_connected:
