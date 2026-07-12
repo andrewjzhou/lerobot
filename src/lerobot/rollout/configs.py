@@ -347,8 +347,13 @@ class RolloutConfig:
 
         policy_path = parser.get_path_arg("policy")
         if policy_path:
-            cli_overrides = parser.get_cli_overrides("policy")
-            self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
+            # YAML-block overrides first, CLI overrides last (CLI wins) — same
+            # merge as TrainPipelineConfig/EvalPipelineConfig.
+            yaml_overrides = parser.get_yaml_overrides("policy")
+            cli_overrides = parser.get_cli_overrides("policy") or []
+            self.policy = PreTrainedConfig.from_pretrained(
+                policy_path, cli_overrides=yaml_overrides + cli_overrides
+            )
             self.policy.pretrained_path = policy_path
         if self.policy is None:
             raise ValueError("--policy.path is required for rollout")
