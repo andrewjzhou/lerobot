@@ -36,6 +36,7 @@ from lerobot.datasets import (
 from lerobot.policies import get_policy_class, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.processor import (
+    ImageCropResizeProcessorStep,
     PolicyProcessorPipeline,
     RobotAction,
     RobotObservation,
@@ -394,6 +395,54 @@ def build_rollout_context(
             "rename_observations_processor": {"rename_map": cfg.rename_map},
         },
     )
+
+    # Auto-resize camera observations when the policy was trained at a
+    # different resolution than the physical cameras produce (e.g. ACT
+    # trained on 480x640 while the cameras only support 960x600 / 1280x720
+    # modes). ACT has no built-in resize and mixed per-camera resolutions
+    # break its token layout, so prepend an explicit resize step to the
+    # preprocessor. Sizes are derived from the checkpoint's input_features.
+    visual_hw = {
+        key: tuple(ft.shape[-2:])
+        for key, ft in (policy_config.input_features or {}).items()
+        if ft.type is FeatureType.VISUAL
+    }
+    if visual_hw and cfg.robot is not None and getattr(cfg.robot, "cameras", None):
+        camera_hw = {
+            f"observation.images.{name}": (cam.height, cam.width)
+            for name, cam in cfg.robot.cameras.items()
+        }
+        mismatched = {
+            key: camera_hw[key]
+            for key, hw in visual_hw.items()
+            if key in camera_hw and camera_hw[key] != hw
+        }
+        crop_params = {
+            f"observation.images.{name}": tuple(box)
+            for name, box in (getattr(cfg, "image_crops", None) or {}).items()
+        }
+        for key in crop_params:
+            if key not in camera_hw:
+                logger.warning("image_crops key %s has no matching camera; ignored", key)
+        if mismatched or crop_params:
+            target_sizes = set(visual_hw.values())
+            if len(target_sizes) != 1:
+                raise ValueError(
+                    f"Camera resolutions {mismatched} don't match the policy inputs, and the "
+                    f"policy expects multiple different image sizes {target_sizes}; "
+                    "cannot auto-resize with a single resize step."
+                )
+            resize_hw = next(iter(target_sizes))
+            preprocessor.steps = [
+                ImageCropResizeProcessorStep(
+                    crop_params_dict=crop_params or None, resize_size=resize_hw
+                ),
+                *preprocessor.steps,
+            ]
+            logger.info(
+                "Image preprocessing: crops %s, resize %s -> %s to match policy inputs.",
+                crop_params or "none", sorted(mismatched) or "none", resize_hw,
+            )
 
     if isinstance(cfg.inference, SyncInferenceConfig) and any(
         isinstance(step, RelativeActionsProcessorStep) and step.enabled

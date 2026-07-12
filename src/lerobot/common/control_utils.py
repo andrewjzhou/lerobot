@@ -313,3 +313,30 @@ def follower_smooth_move_to(
         interp = {k: current[k] * (1 - t) + target[k] * t if k in target else current[k] for k in current}
         robot.send_action(interp)
         time.sleep(1 / fps)
+
+
+def move_robot_to_named_pose(robot, poses: dict, name: str, duration_s: float = 4.0,
+                             fps: int = 30, side: str | None = None) -> None:
+    """Smoothly move follower(s) to a named pose entry (degrees):
+    ``{name: {side: {joint_1.pos: ..., gripper.pos: ...}}}``.
+
+    Handles bimanual (left_/right_-prefixed keys) and single-arm robots;
+    keys without a saved value hold their current position. For single-arm
+    robots pass ``side`` (else the pose entry's only side is used).
+    """
+    entry = poses[name]
+    obs = {k: v for k, v in robot.get_observation().items() if k.endswith(".pos")}
+    bimanual = any(k.startswith(("left_", "right_")) for k in obs)
+    target = dict(obs)
+    if bimanual:
+        for s in ("left", "right"):
+            for k, v in entry.get(s, {}).items():
+                key = f"{s}_{k}"
+                if key in target:
+                    target[key] = v
+    else:
+        s = side or next(iter(entry))
+        for k, v in entry.get(s, {}).items():
+            if k in target:
+                target[k] = v
+    follower_smooth_move_to(robot, obs, target, duration_s=duration_s, fps=fps)

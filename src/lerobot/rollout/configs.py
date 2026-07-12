@@ -58,6 +58,19 @@ class BaseStrategyConfig(RolloutStrategyConfig):
     pass
 
 
+@RolloutStrategyConfig.register_subclass("interactive")
+@dataclass
+class InteractiveStrategyConfig(RolloutStrategyConfig):
+    """Keyed operation: number keys 1..N move the follower to named poses,
+    'g' starts policy inference, 's' stops it (robot holds), 'q'/ESC ends
+    the session. No data recording."""
+
+    # comma-separated pose names from poses_file, mapped to keys 1..N (max 5)
+    poses: str = "ready"
+    poses_file: str = "configs/poses.yaml"
+    move_duration_s: float = 4.0
+
+
 @RolloutStrategyConfig.register_subclass("sentry")
 @dataclass
 class SentryStrategyConfig(RolloutStrategyConfig):
@@ -237,6 +250,12 @@ class RolloutConfig:
     resume: bool = False
     # Rename map for mapping robot/dataset observation keys to policy keys
     rename_map: dict[str, str] = field(default_factory=dict)
+
+    # Per-camera image crops applied BEFORE the auto-resize, as
+    # (top, left, height, width) keyed by camera name. Use to reproduce
+    # training-time preprocessing, e.g. cropping a fisheye camera to its
+    # image circle. Must match the dataset builder's crop exactly.
+    image_crops: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
 
     # Hardware teardown
     # When True (default), smoothly interpolate the robot back to the joint
