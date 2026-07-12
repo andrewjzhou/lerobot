@@ -69,6 +69,11 @@ class InteractiveStrategyConfig(RolloutStrategyConfig):
     poses: str = "ready"
     poses_file: str = "configs/poses.yaml"
     move_duration_s: float = 4.0
+    # When set, each inference run (every 'g' press) logs states/actions/loop
+    # timing at full rate and raw camera frames at reduced rate into
+    # <log_dir>/<session>/runNN/ for offline diagnosis. Empty = off.
+    log_dir: str = ""
+    log_frame_stride: int = 3
 
 
 @RolloutStrategyConfig.register_subclass("sentry")

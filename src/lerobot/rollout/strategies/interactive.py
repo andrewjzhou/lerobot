@@ -22,10 +22,14 @@ yaml), 'g' starts policy inference, 's' stops it (robot holds position),
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections import deque
+from datetime import datetime
+from pathlib import Path
 
+import numpy as np
 import yaml
 
 from lerobot.common.control_utils import move_robot_to_named_pose
@@ -69,6 +73,13 @@ class InteractiveStrategy(BaseStrategy):
 
         self._listener = keyboard.Listener(on_press=on_press)
         self._listener.start()
+        self._run_idx = 0
+        self._last_pose = "startup"
+        self._session_dir = None
+        if cfg.log_dir:
+            self._session_dir = Path(cfg.log_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
+            self._session_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("debug logs -> %s", self._session_dir)
         keymap = " | ".join(f"{i + 1}={n}" for i, n in enumerate(self._pose_names))
         logger.info("Interactive strategy ready — %s | g=start inference | "
                     "s=stop | q/ESC=quit", keymap)
@@ -86,6 +97,7 @@ class InteractiveStrategy(BaseStrategy):
                 move_robot_to_named_pose(robot, self._poses, name,
                                          duration_s=self.config.move_duration_s,
                                          side=self._side)
+                self._last_pose = name
                 logger.info("at pose '%s' — g to start inference", name)
             elif k == "g":
                 self._run_inference(ctx)
@@ -103,6 +115,12 @@ class InteractiveStrategy(BaseStrategy):
         engine.reset()
         engine.resume()
         self._cached_obs_processed = None
+        log = None
+        if self._session_dir is not None:
+            self._run_idx += 1
+            log = {"t": [], "state": [], "action": [], "dt": [],
+                   "frames": [], "state_keys": None, "action_keys": None,
+                   "dir": self._session_dir / f"run{self._run_idx:02d}"}
         logger.info("inference STARTED — 's' to stop%s",
                     f" (auto-stop after {cfg.duration:.0f}s)" if cfg.duration > 0 else "")
         start = time.perf_counter()
@@ -132,10 +150,49 @@ class InteractiveStrategy(BaseStrategy):
             self._log_telemetry(obs_processed, action_dict, ctx.runtime)
 
             dt = time.perf_counter() - loop_start
+            if log is not None and action_dict:
+                self._log_step(log, loop_start - start, obs, action_dict, dt)
             if (sleep_t := control_interval - dt) > 0:
                 precise_sleep(sleep_t)
         engine.pause()
+        if log is not None:
+            self._flush_log(log, why)
         logger.info("inference STOPPED (%s) — number keys to reposition, g to rerun", why)
+
+    def _log_step(self, log, t, obs, action_dict, dt):
+        if log["state_keys"] is None:
+            log["state_keys"] = sorted(k for k in obs if k.endswith(".pos"))
+            log["action_keys"] = sorted(action_dict) if action_dict else []
+        log["t"].append(t)
+        log["dt"].append(dt)
+        log["state"].append([float(obs[k]) for k in log["state_keys"]])
+        log["action"].append([float(action_dict.get(k, np.nan)) for k in log["action_keys"]])
+        if len(log["t"]) % self.config.log_frame_stride == 0:
+            import cv2
+
+            for k, v in obs.items():
+                if isinstance(v, np.ndarray) and v.ndim == 3:
+                    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(v, cv2.COLOR_RGB2BGR),
+                                           [cv2.IMWRITE_JPEG_QUALITY, 90])
+                    if ok:
+                        log["frames"].append((len(log["t"]) - 1, k, buf.tobytes()))
+
+    def _flush_log(self, log, why):
+        d = log["dir"]
+        d.mkdir(parents=True, exist_ok=True)
+        np.savez(d / "trace.npz",
+                 t=np.array(log["t"]), dt=np.array(log["dt"]),
+                 state=np.array(log["state"]), action=np.array(log["action"]))
+        for step, cam, buf in log["frames"]:
+            (d / f"{cam}_{step:04d}.jpg").write_bytes(buf)
+        (d / "meta.json").write_text(json.dumps({
+            "start_pose": self._last_pose, "stopped": why,
+            "steps": len(log["t"]),
+            "state_keys": log["state_keys"], "action_keys": log["action_keys"],
+            "frame_stride": self.config.log_frame_stride,
+        }, indent=2))
+        logger.info("debug log written: %s (%d steps, %d frames)",
+                    d, len(log["t"]), len(log["frames"]))
 
     def teardown(self, ctx: RolloutContext) -> None:
         try:
