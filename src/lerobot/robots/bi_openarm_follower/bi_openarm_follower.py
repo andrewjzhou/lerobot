@@ -126,6 +126,16 @@ class BiOpenArmFollower(BimanualMixin, Robot):
         )
 
     @check_if_not_connected
+    def get_pos_observation(self) -> RobotObservation:
+        """Motor positions only (left_/right_-prefixed) — no camera reads."""
+        obs_dict: RobotObservation = {}
+        for key, value in self.left_arm.get_pos_observation().items():
+            obs_dict[f"left_{key}"] = value
+        for key, value in self.right_arm.get_pos_observation().items():
+            obs_dict[f"right_{key}"] = value
+        return obs_dict
+
+    @check_if_not_connected
     def get_observation(self) -> RobotObservation:
         obs_dict: RobotObservation = {}
 

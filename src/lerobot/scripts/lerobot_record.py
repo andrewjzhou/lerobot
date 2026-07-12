@@ -238,7 +238,11 @@ def _retreat_to_shutdown_poses(robot, poses_file: str) -> None:
     import yaml
 
     poses = yaml.safe_load(open(poses_file))
-    obs = {k: v for k, v in robot.get_observation().items() if k.endswith(".pos")}
+    # Positions only — the shutdown retreat must not fail on a stale camera.
+    if hasattr(robot, "get_pos_observation"):
+        obs = dict(robot.get_pos_observation())
+    else:
+        obs = {k: v for k, v in robot.get_observation().items() if k.endswith(".pos")}
     bimanual = any(k.startswith(("left_", "right_")) for k in obs)
     sides = ["left", "right"] if bimanual else [getattr(robot.config, "side", "left")]
     prefix = (lambda side, k: f"{side}_{k}") if bimanual else (lambda side, k: k)

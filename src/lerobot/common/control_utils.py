@@ -325,7 +325,12 @@ def move_robot_to_named_pose(robot, poses: dict, name: str, duration_s: float = 
     robots pass ``side`` (else the pose entry's only side is used).
     """
     entry = poses[name]
-    obs = {k: v for k, v in robot.get_observation().items() if k.endswith(".pos")}
+    # Positions only when the robot supports it — pose moves (incl. shutdown
+    # retreats) must not fail because a camera frame is stale.
+    if hasattr(robot, "get_pos_observation"):
+        obs = dict(robot.get_pos_observation())
+    else:
+        obs = {k: v for k, v in robot.get_observation().items() if k.endswith(".pos")}
     bimanual = any(k.startswith(("left_", "right_")) for k in obs)
     target = dict(obs)
     if bimanual:

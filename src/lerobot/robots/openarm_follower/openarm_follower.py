@@ -228,6 +228,14 @@ class OpenArmFollower(Robot):
         )
 
     @check_if_not_connected
+    def get_pos_observation(self) -> RobotObservation:
+        """Motor positions only — no camera reads. For motion/shutdown code
+        paths that must keep working when a camera stalls or dies."""
+        states = self.bus.sync_read_all_states()
+        return {f"{motor}.pos": states.get(motor, {}).get("position", 0.0)
+                for motor in self.bus.motors}
+
+    @check_if_not_connected
     def get_observation(self) -> RobotObservation:
         """
         Get current observation from robot including position, velocity, and torque.
