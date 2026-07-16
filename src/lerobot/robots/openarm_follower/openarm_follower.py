@@ -89,7 +89,7 @@ class OpenArmFollower(Robot):
 
     @property
     def _motors_ft(self) -> dict[str, type]:
-        """Motor features for observation and action spaces."""
+        """Motor features for the observation space."""
         features: dict[str, type] = {}
         for motor in self.bus.motors:
             features[f"{motor}.pos"] = float
@@ -97,6 +97,13 @@ class OpenArmFollower(Robot):
                 features[f"{motor}.vel"] = float
                 features[f"{motor}.torque"] = float
         return features
+
+    @property
+    def _pos_ft(self) -> dict[str, type]:
+        """Position-only motor features — the action space. Actions stay
+        {motor}.pos regardless of use_velocity_and_torque (vel/torque are
+        observation telemetry; leaders only produce positions)."""
+        return {f"{motor}.pos": float for motor in self.bus.motors}
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
@@ -112,8 +119,8 @@ class OpenArmFollower(Robot):
 
     @cached_property
     def action_features(self) -> dict[str, type]:
-        """Action features."""
-        return self._motors_ft
+        """Action features (positions only)."""
+        return self._pos_ft
 
     @property
     def is_connected(self) -> bool:
