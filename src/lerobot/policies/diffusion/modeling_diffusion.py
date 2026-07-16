@@ -98,6 +98,8 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues[OBS_ENV_STATE] = deque(maxlen=self.config.n_obs_steps)
+        for key in self.config.extra_state_keys:
+            self._queues[key] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
@@ -167,9 +169,8 @@ class DiffusionPolicy(PreTrainedPolicy):
                 if self.config.n_obs_steps == 1 and batch[key].ndim == 4:
                     batch[key] = batch[key].unsqueeze(1)
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        loss = self.diffusion.compute_loss(batch)
-        # no output_dict so returning None
-        return loss, None
+        loss, output_dict = self.diffusion.compute_loss(batch)
+        return loss, output_dict
 
 
 def _make_noise_scheduler(name: str, **kwargs: dict):
@@ -194,6 +195,8 @@ class DiffusionModel(nn.Module):
 
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature.shape[0]
+        for key in self.config.extra_state_keys:
+            global_cond_dim += self.config.input_features[key].shape[0]
         if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -207,6 +210,17 @@ class DiffusionModel(nn.Module):
             global_cond_dim += self.config.env_state_feature.shape[0]
 
         self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
+
+        # Lightweight head predicting the smoothed current (normalized) from
+        # the global conditioning — auxiliary regularization only, unused at
+        # inference (arXiv 2607.03529).
+        if config.current_aux_weight > 0:
+            aux_dim = config.input_features[config.current_aux_key].shape[0]
+            self.current_aux_head = nn.Sequential(
+                nn.Linear(global_cond_dim * config.n_obs_steps, 128),
+                nn.ReLU(),
+                nn.Linear(128, aux_dim * config.n_obs_steps),
+            )
 
         if config.compile_model:
             # Compile the U-Net. "reduce-overhead" is preferred for the small-batch repetitive loops
@@ -270,6 +284,8 @@ class DiffusionModel(nn.Module):
         """Encode image features and concatenate them all together along with the state vector."""
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
         global_cond_feats = [batch[OBS_STATE]]
+        for key in self.config.extra_state_keys:
+            global_cond_feats.append(batch[key])
         # Extract image features.
         if self.config.image_features:
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -394,9 +410,17 @@ class DiffusionModel(nn.Module):
             in_episode_bound = ~batch["action_is_pad"]
             mask = in_episode_bound.unsqueeze(-1)
             num_valid = mask.sum() * loss.shape[-1]
-            return (loss * mask).sum() / num_valid.clamp_min(1)
+            loss = (loss * mask).sum() / num_valid.clamp_min(1)
+        else:
+            loss = loss.mean()
 
-        return loss.mean()
+        if self.config.current_aux_weight > 0:
+            target = batch[self.config.current_aux_key].flatten(start_dim=1)
+            aux_loss = F.mse_loss(self.current_aux_head(global_cond), target)
+            total = loss + self.config.current_aux_weight * aux_loss
+            return total, {"denoise_loss": loss.item(), "current_aux_loss": aux_loss.item()}
+
+        return loss, None
 
 
 class SpatialSoftmax(nn.Module):

@@ -115,6 +115,18 @@ class DiffusionConfig(PreTrainedConfig):
     # which avoids excessive padding and leads to improved training results.
     drop_n_last_frames: int = 7  # horizon - n_action_steps - n_obs_steps + 1
 
+    # --- Current-as-touch additions (arXiv 2607.03529) ---
+    # Extra STATE-type input features concatenated to observation.state in the
+    # global conditioning (e.g. ["observation.current"]). They receive the same
+    # n_obs_steps window and are normalized like any input feature.
+    extra_state_keys: list[str] = field(default_factory=list)
+    # Auxiliary smoothed-current regularization: weight > 0 adds a small MLP
+    # head predicting `current_aux_key` (an input feature, so normalized by the
+    # preprocessor, but NEVER fed to the conditioning) from the global cond;
+    # total loss += weight * MSE. Inference is unaffected (head unused).
+    current_aux_weight: float = 0.0
+    current_aux_key: str = "observation.current_smooth"
+
     # Architecture / modeling.
     # Vision backbone.
     vision_backbone: str = "resnet18"
