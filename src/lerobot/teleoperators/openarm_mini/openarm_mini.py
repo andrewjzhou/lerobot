@@ -227,7 +227,9 @@ class OpenArmMini(Teleoperator):
         """Get current action (read positions from all motors)."""
         start = time.perf_counter()
 
-        positions = self.bus.sync_read("Present_Position")
+        # Transient "no status packet" errors happen under CPU/USB load (e.g.
+        # while episode videos encode); retry instead of killing the session.
+        positions = self.bus.sync_read("Present_Position", num_retry=3)
 
         # Joint 6↔7 remap: leader joint_6 → follower joint_7 and vice versa.
         # Per-side direction flip is applied based on the configured `side`.
