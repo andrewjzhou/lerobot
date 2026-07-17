@@ -42,6 +42,11 @@ class RTCConfig:
     prefix_attention_schedule: RTCAttentionSchedule = RTCAttentionSchedule.LINEAR
     max_guidance_weight: float = 10.0
     execution_horizon: int = 10
+    # Cross-fade this many steps from the old chunk's remaining actions into
+    # each replacement chunk (0 = hard switch). For policies without
+    # prefix-inpainting support (e.g. diffusion), this bounds the command
+    # discontinuity when consecutive chunks pick different trajectory modes.
+    splice_blend_steps: int = 0
 
     # Debug settings
     debug: bool = False

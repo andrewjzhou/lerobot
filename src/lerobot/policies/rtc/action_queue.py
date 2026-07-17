@@ -185,8 +185,29 @@ class ActionQueue:
             real_delay: Number of time steps to skip due to inference delay.
         """
         clamped_delay = max(0, min(real_delay, len(original_actions), len(processed_actions)))
-        self.original_queue = original_actions[clamped_delay:].clone()
-        self.queue = processed_actions[clamped_delay:].clone()
+        new_original = original_actions[clamped_delay:].clone()
+        new_processed = processed_actions[clamped_delay:].clone()
+
+        blend = self.cfg.splice_blend_steps
+        if blend > 0 and self.queue is not None:
+            # Cross-fade from the old chunk's remaining (time-aligned) actions
+            # into the new chunk so a trajectory-mode switch cannot produce a
+            # step discontinuity in the served command stream.
+            old_processed = self.queue[self.last_index:]
+            old_original = (self.original_queue[self.last_index:]
+                            if self.original_queue is not None else old_processed)
+            n = min(blend, len(old_processed), len(new_processed))
+            if n > 0:
+                alphas = torch.linspace(1.0 / (n + 1), n / (n + 1), n,
+                                        dtype=new_processed.dtype)
+                for i in range(n):
+                    a = alphas[i]
+                    new_processed[i] = (1 - a) * old_processed[i].to(new_processed.dtype) + a * new_processed[i]
+                    if i < len(old_original):
+                        new_original[i] = (1 - a) * old_original[i].to(new_original.dtype) + a * new_original[i]
+
+        self.original_queue = new_original
+        self.queue = new_processed
 
         logger.debug(f"original_actions shape: {self.original_queue.shape}")
         logger.debug(f"processed_actions shape: {self.queue.shape}")
