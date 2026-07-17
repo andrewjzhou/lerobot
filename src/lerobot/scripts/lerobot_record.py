@@ -90,6 +90,7 @@ import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pprint import pformat
+from threading import Thread
 
 from lerobot.cameras import CameraConfig  # noqa: F401
 from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
@@ -246,6 +247,43 @@ class SubtaskTracker:
             return
         self.count += 1
         print(f"subtask {self.count}/{len(self.descriptions)} started: '{self.label}'")
+
+
+def save_episode_with_live_teleop(dataset, robot, teleop, fps: int) -> None:
+    """Save the episode WITHOUT freezing the follower.
+
+    ``dataset.save_episode()`` can block the caller for seconds while video
+    files finalize (mp4 faststart "second pass"); meanwhile the operator's
+    leader keeps moving, and the next control cycle would snap the follower
+    onto the drifted leader pose (this has caused collisions). Run the save
+    in a background thread and keep forwarding leader actions to the
+    follower in the foreground until it completes. The dataset is touched
+    ONLY by the save thread; the foreground touches only robot+teleop, so
+    there is no shared state between the two.
+    """
+    error: list[BaseException] = []
+
+    def _save():
+        try:
+            dataset.save_episode()
+        except BaseException as e:  # noqa: BLE001 — propagated below
+            error.append(e)
+
+    t = Thread(target=_save, daemon=True, name="SaveEpisode")
+    t.start()
+    bridge = teleop is not None and not isinstance(teleop, list) and hasattr(teleop, "get_action")
+    while t.is_alive():
+        t0 = time.perf_counter()
+        if bridge:
+            try:
+                robot.send_action(teleop.get_action())
+            except Exception as e:  # hardware hiccup: stop bridging, keep saving
+                logging.warning(f"Teleop bridge during episode save stopped: {e}")
+                bridge = False
+        precise_sleep(max(1 / fps - (time.perf_counter() - t0), 0.0))
+    t.join()
+    if error:
+        raise error[0]
 
 
 """ --------------- record_loop() data flow --------------------------
@@ -575,7 +613,7 @@ def record(
                     dataset.clear_episode_buffer()
                     continue
 
-                dataset.save_episode()
+                save_episode_with_live_teleop(dataset, robot, teleop, cfg.dataset.fps)
                 recorded_episodes += 1
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
