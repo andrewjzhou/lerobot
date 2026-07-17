@@ -193,11 +193,11 @@ class RecordConfig:
     # follower(s) retreat through them BEFORE torque-off, so the arms don't
     # fall onto the workspace when the motors release.
     shutdown_poses_file: str | None = None
-    # Subtask boundaries: when true, SPACE marks the start of the next
-    # subtask from subtask_descriptions; each frame's per-frame `task` string
-    # becomes the CURRENT subtask ("idle" before the first press). At episode
-    # end a warning fires if not every boundary was pressed, while left-arrow
-    # re-record is still possible during the reset phase.
+    # Subtask boundaries: when true, each episode STARTS in the first entry
+    # of subtask_descriptions and SPACE marks the start of the NEXT subtask
+    # (N subtasks = N-1 presses); each frame's per-frame `task` string is the
+    # CURRENT subtask. At episode end a warning fires if not every subtask
+    # was started, while left-arrow re-record is still possible during reset.
     set_subtask_boundaries: bool = False
     subtask_descriptions: list[str] = field(default_factory=list)
 
@@ -217,16 +217,18 @@ class RecordConfig:
 class SubtaskTracker:
     """Per-episode subtask pointer driven by SPACE presses.
 
-    Frames are labeled "idle" until the first advance, then with the current
-    subtask description. Presses beyond the last subtask are ignored with a
-    warning. `complete` is true when every boundary was pressed.
+    The episode STARTS in subtask 1 (no press needed); each SPACE marks the
+    start of the NEXT subtask. Presses beyond the last subtask are ignored
+    with a warning. `complete` is true when every subtask was started.
     """
 
     IDLE = "idle"
 
     def __init__(self, descriptions: list[str]):
         self.descriptions = list(descriptions)
-        self.count = 0
+        self.count = 1 if self.descriptions else 0
+        if self.count:
+            print(f"subtask 1/{len(self.descriptions)} started: '{self.label}'")
 
     @property
     def label(self) -> str:
