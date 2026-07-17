@@ -81,5 +81,6 @@ class BaseStrategy(RolloutStrategy):
         self._teardown_hardware(
             ctx.hardware,
             return_to_initial_position=ctx.runtime.cfg.return_to_initial_position,
+            shutdown_poses_file=ctx.runtime.cfg.shutdown_poses_file,
         )
         logger.info("Base strategy teardown complete")

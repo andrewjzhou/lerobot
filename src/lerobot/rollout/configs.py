@@ -267,6 +267,10 @@ class RolloutConfig:
     # positions captured at startup before disconnecting.  Set to False to
     # leave the robot in its final achieved pose at shutdown.
     return_to_initial_position: bool = True
+    # Optional yaml with 'shutdown_1'/'shutdown_2' waypoint poses. When set,
+    # teardown retreats through them before torque-off (takes precedence over
+    # return_to_initial_position) so the arms don't fall onto the workspace.
+    shutdown_poses_file: str | None = None
 
     # Torch compile
     use_torch_compile: bool = False

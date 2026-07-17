@@ -315,6 +315,47 @@ def follower_smooth_move_to(
         time.sleep(1 / fps)
 
 
+def retreat_to_shutdown_poses(robot, poses_file: str) -> None:
+    """Replay shutdown_1 -> shutdown_2 waypoints (joint splines) before
+    torque-off. Handles bimanual (left_/right_-prefixed keys) and single-arm
+    robots; a side without a saved pose holds its current position."""
+    import yaml
+
+    poses = yaml.safe_load(open(poses_file))
+    # Positions only — the shutdown retreat must not fail on a stale camera.
+    if hasattr(robot, "get_pos_observation"):
+        obs = dict(robot.get_pos_observation())
+    else:
+        obs = {k: v for k, v in robot.get_observation().items() if k.endswith(".pos")}
+    bimanual = any(k.startswith(("left_", "right_")) for k in obs)
+    sides = ["left", "right"] if bimanual else [getattr(robot.config, "side", "left")]
+    prefix = (lambda side, k: f"{side}_{k}") if bimanual else (lambda side, k: k)
+
+    waypoints = []
+    prev = dict(obs)
+    for name in ("shutdown_1", "shutdown_2"):
+        wp = dict(prev)
+        for side in sides:
+            saved = poses.get(name, {}).get(side)
+            if saved is None:
+                continue
+            for k, v in saved.items():
+                key = prefix(side, k)
+                if key in wp:
+                    wp[key] = v
+        waypoints.append(wp)
+        prev = wp
+    rest = waypoints[-1]
+    already = max(abs(obs[k] - rest[k]) for k in rest if not k.endswith("gripper.pos"))
+    if already < 5.0:
+        return
+    logging.info("Retreating to shutdown poses before torque-off...")
+    prev = obs
+    for wp, dur in zip(waypoints, (3.0, 2.5)):
+        follower_smooth_move_to(robot, prev, wp, duration_s=dur)
+        prev = wp
+
+
 def move_robot_to_named_pose(robot, poses: dict, name: str, duration_s: float = 4.0,
                              fps: int = 30, side: str | None = None) -> None:
     """Smoothly move follower(s) to a named pose entry (degrees):

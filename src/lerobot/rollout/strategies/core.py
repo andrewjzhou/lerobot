@@ -116,14 +116,23 @@ class RolloutStrategy(abc.ABC):
             engine.resume()
         return False
 
-    def _teardown_hardware(self, hw: HardwareContext, return_to_initial_position: bool = True) -> None:
-        """Stop the inference engine, optionally return robot to initial position, and disconnect hardware."""
+    def _teardown_hardware(self, hw: HardwareContext, return_to_initial_position: bool = True,
+                           shutdown_poses_file: str | None = None) -> None:
+        """Stop the inference engine, retreat the robot (shutdown poses when
+        configured, else optionally the initial position), and disconnect."""
         if self._engine is not None:
             logger.info("Stopping inference engine...")
             self._engine.stop()
         robot = hw.robot_wrapper.inner
         if robot.is_connected:
-            if return_to_initial_position and hw.initial_position:
+            if shutdown_poses_file:
+                from lerobot.common.control_utils import retreat_to_shutdown_poses
+
+                try:
+                    retreat_to_shutdown_poses(robot, shutdown_poses_file)
+                except Exception:
+                    logger.exception("Shutdown-pose retreat FAILED — arms may not be at rest")
+            elif return_to_initial_position and hw.initial_position:
                 logger.info("Returning robot to initial position before shutdown...")
                 self._return_to_initial_position(hw)
             elif not return_to_initial_position:
