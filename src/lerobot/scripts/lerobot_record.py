@@ -88,7 +88,7 @@ lerobot-record \\
 
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pprint import pformat
 
 from lerobot.cameras import CameraConfig  # noqa: F401
@@ -193,6 +193,13 @@ class RecordConfig:
     # follower(s) retreat through them BEFORE torque-off, so the arms don't
     # fall onto the workspace when the motors release.
     shutdown_poses_file: str | None = None
+    # Subtask boundaries: when true, SPACE marks the start of the next
+    # subtask from subtask_descriptions; each frame's per-frame `task` string
+    # becomes the CURRENT subtask ("idle" before the first press). At episode
+    # end a warning fires if not every boundary was pressed, while left-arrow
+    # re-record is still possible during the reset phase.
+    set_subtask_boundaries: bool = False
+    subtask_descriptions: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if self.teleop is None:
@@ -201,6 +208,42 @@ class RecordConfig:
                 "Use --teleop.type=... to specify one. "
                 "For policy-based deployment, use lerobot-rollout instead."
             )
+        if self.set_subtask_boundaries and not self.subtask_descriptions:
+            raise ValueError(
+                "set_subtask_boundaries=true requires a non-empty subtask_descriptions list."
+            )
+
+
+class SubtaskTracker:
+    """Per-episode subtask pointer driven by SPACE presses.
+
+    Frames are labeled "idle" until the first advance, then with the current
+    subtask description. Presses beyond the last subtask are ignored with a
+    warning. `complete` is true when every boundary was pressed.
+    """
+
+    IDLE = "idle"
+
+    def __init__(self, descriptions: list[str]):
+        self.descriptions = list(descriptions)
+        self.count = 0
+
+    @property
+    def label(self) -> str:
+        return self.IDLE if self.count == 0 else self.descriptions[self.count - 1]
+
+    @property
+    def complete(self) -> bool:
+        return self.count == len(self.descriptions)
+
+    def advance(self) -> None:
+        if self.complete:
+            logging.warning(
+                "Extra SPACE press ignored: all %d subtasks already started.", len(self.descriptions)
+            )
+            return
+        self.count += 1
+        print(f"subtask {self.count}/{len(self.descriptions)} started: '{self.label}'")
 
 
 """ --------------- record_loop() data flow --------------------------
@@ -251,6 +294,7 @@ def record_loop(
     single_task: str | None = None,
     display_data: bool = False,
     display_compressed_images: bool = False,
+    subtasks: "SubtaskTracker | None" = None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -291,6 +335,11 @@ def record_loop(
         if events["exit_early"]:
             events["exit_early"] = False
             break
+
+        if events["advance_subtask"]:
+            events["advance_subtask"] = False
+            if subtasks is not None:
+                subtasks.advance()
 
         # Get robot observation
         obs = robot.get_observation()
@@ -340,7 +389,8 @@ def record_loop(
         # Write to dataset
         if dataset is not None:
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
-            frame = {**observation_frame, **action_frame, "task": single_task}
+            frame = {**observation_frame, **action_frame,
+                     "task": subtasks.label if subtasks is not None else single_task}
             dataset.add_frame(frame)
 
         if display_data:
@@ -470,6 +520,11 @@ def record(
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+                # A stray SPACE during the previous reset must not leak in.
+                events["advance_subtask"] = False
+                subtasks = (
+                    SubtaskTracker(cfg.subtask_descriptions) if cfg.set_subtask_boundaries else None
+                )
                 record_loop(
                     robot=robot,
                     events=events,
@@ -483,7 +538,13 @@ def record(
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
                     display_compressed_images=display_compressed_images,
+                    subtasks=subtasks,
                 )
+                if subtasks is not None and not subtasks.complete:
+                    msg = (f"only {subtasks.count}/{len(subtasks.descriptions)} subtask boundaries "
+                           "set — press LEFT ARROW during reset to re-record")
+                    logging.warning(msg)
+                    log_say("Missing subtask boundaries", cfg.play_sounds)
 
                 # Execute a few seconds without recording to give time to manually reset the environment
                 # Skip reset for the last episode to be recorded
