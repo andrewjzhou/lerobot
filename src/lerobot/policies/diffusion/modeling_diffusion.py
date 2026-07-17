@@ -102,8 +102,13 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._queues[key] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None,
+                             **kwargs) -> Tensor:
         """Predict a chunk of actions given environment observations.
+
+        ``**kwargs`` absorbs the async/RTC engine interface (``inference_delay``,
+        ``prev_chunk_left_over``) — unused here: chunks are generated fresh and
+        the engine's append-mode ActionQueue provides continuity.
 
         Supports two modes:
         - Online (queues populated via select_action): stacks observations from internal queues.

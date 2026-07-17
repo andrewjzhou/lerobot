@@ -164,12 +164,13 @@ class ActionQueue:
             action_index_before_inference: Index before inference started, for validation.
         """
         with self.lock:
-            delay = self._check_and_resolve_delays(real_delay, action_index_before_inference)
-
             if self.cfg.enabled:
+                delay = self._check_and_resolve_delays(real_delay, action_index_before_inference)
                 self._replace_actions_queue(original_actions, processed_actions, delay)
                 return
 
+            # Append mode: chunks queue back-to-back; the delay bookkeeping
+            # (and its mismatch warning) only applies to replace mode.
             self._append_actions_queue(original_actions, processed_actions)
 
     def _replace_actions_queue(self, original_actions: Tensor, processed_actions: Tensor, real_delay: int):

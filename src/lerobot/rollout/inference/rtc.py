@@ -26,6 +26,7 @@ import logging
 import math
 import time
 import traceback
+from collections import deque
 from threading import Event, Lock, Thread
 from typing import Any
 
@@ -121,6 +122,12 @@ class RTCInferenceEngine(InferenceEngine):
 
         self._action_queue: ActionQueue | None = None
         self._obs_holder: dict[str, Any] = {}
+        # Policies with n_obs_steps > 1 (e.g. diffusion) were trained on
+        # consecutive-tick observation windows; keep the last n raw
+        # observations (notify_observation ticks at the control rate) and
+        # window them at generation time.
+        self._n_obs_steps = int(getattr(policy.config, "n_obs_steps", 1) or 1)
+        self._obs_history: deque = deque(maxlen=self._n_obs_steps)
         self._obs_lock = Lock()
         self._policy_active = Event()
         self._compile_warmup_done = Event()
@@ -224,6 +231,8 @@ class RTCInferenceEngine(InferenceEngine):
         self._postprocessor.reset()
         if self._action_queue is not None:
             self._action_queue.clear()
+        with self._obs_lock:
+            self._obs_history.clear()
 
     # ------------------------------------------------------------------
     # Action production (called from main thread)
@@ -239,6 +248,7 @@ class RTCInferenceEngine(InferenceEngine):
         """Publish the latest observation for the RTC thread to consume."""
         with self._obs_lock:
             self._obs_holder["obs"] = obs
+            self._obs_history.append(obs)
 
     # ------------------------------------------------------------------
     # RTC: background inference thread
@@ -276,13 +286,36 @@ class RTCInferenceEngine(InferenceEngine):
                         latency = latency_tracker.max()
                         delay = math.ceil(latency / time_per_chunk) if latency else 0
 
-                        obs_batch = build_dataset_frame(self._hw_features, obs, prefix="observation")
-                        obs_batch = prepare_observation_for_inference(
-                            obs_batch, policy_device, self._task, self._robot.robot_type
-                        )
-                        obs_batch["task"] = [self._task]
-
-                        preprocessed = self._preprocessor(obs_batch)
+                        if self._n_obs_steps > 1:
+                            # Preprocess the last n consecutive-tick raw
+                            # observations individually (the image steps are
+                            # 4-D only), then stack into (B, n_obs_steps, ...)
+                            # as the policy was trained.
+                            with self._obs_lock:
+                                window = list(self._obs_history)
+                            while len(window) < self._n_obs_steps:
+                                window.insert(0, window[0])
+                            frames = []
+                            for o in window:
+                                fb = build_dataset_frame(self._hw_features, o, prefix="observation")
+                                fb = prepare_observation_for_inference(
+                                    fb, policy_device, self._task, self._robot.robot_type
+                                )
+                                fb["task"] = [self._task]
+                                frames.append(self._preprocessor(fb))
+                            preprocessed = {
+                                k: torch.stack([f[k] for f in frames], dim=1)
+                                for k, v in frames[-1].items()
+                                if isinstance(v, torch.Tensor)
+                            }
+                            preprocessed["task"] = [self._task]
+                        else:
+                            obs_batch = build_dataset_frame(self._hw_features, obs, prefix="observation")
+                            obs_batch = prepare_observation_for_inference(
+                                obs_batch, policy_device, self._task, self._robot.robot_type
+                            )
+                            obs_batch["task"] = [self._task]
+                            preprocessed = self._preprocessor(obs_batch)
 
                         if prev_actions is not None and self._relative_step is not None:
                             # Rebase against the raw cached state so the leftover tail stays in
