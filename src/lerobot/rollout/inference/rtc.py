@@ -221,6 +221,15 @@ class RTCInferenceEngine(InferenceEngine):
     def resume(self) -> None:
         """Resume the RTC background thread."""
         logger.info("Resuming RTC inference thread")
+        if self._action_queue is not None and self._rtc_config.splice_blend_steps > 0:
+            # Anchor the first chunk's cross-fade at the robot's current pose
+            # so inference ramps out of the held position instead of jumping.
+            try:
+                pos = self._robot.get_pos_observation()
+                seed = torch.tensor([float(pos[k]) for k in self._robot.action_features])
+                self._action_queue.set_seed(seed)
+            except Exception:
+                logger.exception("Could not seed first-chunk blend (continuing without)")
         self._policy_active.set()
 
     def reset(self) -> None:

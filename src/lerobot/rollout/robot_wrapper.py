@@ -47,6 +47,13 @@ class ThreadSafeRobot:
         with self._lock:
             return self._robot.send_action(action)
 
+    def get_pos_observation(self) -> dict[str, Any]:
+        """Motor positions only (camera-free) when the robot supports it."""
+        with self._lock:
+            if hasattr(self._robot, "get_pos_observation"):
+                return self._robot.get_pos_observation()
+            return {k: v for k, v in self._robot.get_observation().items() if k.endswith(".pos")}
+
     # -- Read-only proxies (no lock needed) -----------------------------------
 
     @property

@@ -63,6 +63,10 @@ class ActionQueue:
         self.lock = Lock()
         self.last_index = 0
         self.cfg = cfg
+        # Optional blend anchor for the FIRST chunk of a run: the robot's
+        # pose at inference start (processed/robot action space). Later
+        # chunks blend from the previous queue instead.
+        self.seed_action: Tensor | None = None
 
     def get(self) -> Tensor | None:
         """Get the next action from the queue.
@@ -85,6 +89,12 @@ class ActionQueue:
             self.queue = None
             self.original_queue = None
             self.last_index = 0
+            self.seed_action = None
+
+    def set_seed(self, action: Tensor) -> None:
+        """Anchor the first chunk's cross-fade at this action (robot pose)."""
+        with self.lock:
+            self.seed_action = action
 
     def qsize(self) -> int:
         """Get the number of remaining actions in the queue.
@@ -189,7 +199,17 @@ class ActionQueue:
         new_processed = processed_actions[clamped_delay:].clone()
 
         blend = self.cfg.splice_blend_steps
-        if blend > 0 and self.queue is not None:
+        if blend > 0 and self.queue is None and self.seed_action is not None:
+            # First chunk of a run: blend out of the robot's held pose (the
+            # chunk may start noticeably away from it — warmup latency drops
+            # its first actions). Processed space only.
+            n = min(blend, len(new_processed))
+            seed = self.seed_action.to(new_processed.dtype)
+            for i in range(n):
+                a = (i + 1) / (n + 1)
+                new_processed[i] = (1 - a) * seed + a * new_processed[i]
+            self.seed_action = None
+        elif blend > 0 and self.queue is not None:
             # Cross-fade from the old chunk's remaining (time-aligned) actions
             # into the new chunk so a trajectory-mode switch cannot produce a
             # step discontinuity in the served command stream.
