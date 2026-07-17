@@ -160,6 +160,34 @@ class RolloutContext:
 # ---------------------------------------------------------------------------
 
 
+def add_current_features(policy_config, all_obs_features: dict,
+                         dataset_features: dict, hw_features: dict) -> None:
+    """Current-as-touch (arXiv 2607.03529) deployment support: when the
+    policy consumes ``observation.current``, assemble it from the robot's
+    per-motor torque telemetry (= KT*Iq, requires use_velocity_and_torque on
+    the follower arm configs). ``observation.current_smooth`` — an aux-loss
+    target that is an input feature only so it gets normalized at training —
+    is aliased to the raw current at inference (the conditioning never
+    reads it)."""
+    current_ft = policy_config.input_features.get("observation.current")
+    if current_ft is None:
+        return
+    torque_keys = [k for k, v in all_obs_features.items()
+                   if v is float and k.endswith(".torque")]
+    if len(torque_keys) != current_ft.shape[0]:
+        raise ValueError(
+            f"policy expects observation.current dim {current_ft.shape[0]} but the robot "
+            f"provides {len(torque_keys)} torque channels — enable use_velocity_and_torque "
+            "on the follower arm config(s)"
+        )
+    entry = {"dtype": "float32", "shape": (len(torque_keys),), "names": torque_keys}
+    for key in ("observation.current", "observation.current_smooth"):
+        if key in policy_config.input_features:
+            dataset_features[key] = dict(entry)
+            hw_features[key] = dict(entry)
+    logger.info("observation.current wired from torque telemetry: %s...", torque_keys[:2])
+
+
 def build_rollout_context(
     cfg: RolloutConfig,
     shutdown_event: Event,
@@ -299,6 +327,7 @@ def build_rollout_context(
     )
     dataset_features = combine_feature_dicts(action_dataset_features, observation_dataset_features)
     hw_features = hw_to_dataset_features(observation_features_hw, "observation")
+    add_current_features(policy_config, all_obs_features, dataset_features, hw_features)
     raw_action_keys = list(action_features_hw.keys())
     policy_action_names = getattr(policy_config, "action_feature_names", None)
     ordered_action_keys = _resolve_action_key_order(

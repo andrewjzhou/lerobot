@@ -161,7 +161,7 @@ class InteractiveStrategy(BaseStrategy):
 
     def _log_step(self, log, t, obs, action_dict, dt):
         if log["state_keys"] is None:
-            log["state_keys"] = sorted(k for k in obs if k.endswith(".pos"))
+            log["state_keys"] = sorted(k for k in obs if k.endswith((".pos", ".torque")))
             log["action_keys"] = sorted(action_dict) if action_dict else []
         log["t"].append(t)
         log["dt"].append(dt)
