@@ -201,6 +201,9 @@ class RecordConfig:
     # was started, while left-arrow re-record is still possible during reset.
     set_subtask_boundaries: bool = False
     subtask_descriptions: list[str] = field(default_factory=list)
+    # Print a per-phase timing breakdown of the record loop every ~5 s
+    # (obs / teleop / send / dataset / sleep) to locate rate bottlenecks.
+    profile: bool = False
 
     def __post_init__(self):
         if self.teleop is None:
@@ -335,6 +338,7 @@ def record_loop(
     display_data: bool = False,
     display_compressed_images: bool = False,
     subtasks: "SubtaskTracker | None" = None,
+    profile: bool = False,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -368,6 +372,7 @@ def record_loop(
 
     no_action_count = 0
     timestamp = 0
+    _prof: dict = {}
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
@@ -382,7 +387,9 @@ def record_loop(
                 subtasks.advance()
 
         # Get robot observation
+        _t0 = time.perf_counter()
         obs = robot.get_observation()
+        _t_obs = time.perf_counter()
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
@@ -391,6 +398,7 @@ def record_loop(
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
 
         # Get action from teleop
+        _t_frame1 = time.perf_counter()
         if isinstance(teleop, Teleoperator):
             act = teleop.get_action()
             if robot.name == "unitree_g1":
@@ -424,7 +432,9 @@ def record_loop(
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
+        _t_teleop = time.perf_counter()
         _sent_action = robot.send_action(robot_action_to_send)
+        _t_send = time.perf_counter()
 
         # Write to dataset
         if dataset is not None:
@@ -439,6 +449,20 @@ def record_loop(
             )
 
         dt_s = time.perf_counter() - start_loop_t
+        if profile:
+            _prof.setdefault("obs", []).append(_t_obs - _t0)
+            _prof.setdefault("frame+teleop", []).append(_t_teleop - _t_obs)
+            _prof.setdefault("send", []).append(_t_send - _t_teleop)
+            _prof.setdefault("dataset+disp", []).append(time.perf_counter() - _t_send)
+            _prof.setdefault("tick_work", []).append(dt_s)
+            if len(_prof["tick_work"]) % (5 * fps) == 0:
+                import numpy as _np
+
+                parts = " | ".join(
+                    f"{k} {1e3*_np.median(v):5.1f}/{1e3*_np.percentile(v,95):5.1f}ms"
+                    for k, v in _prof.items()
+                )
+                logging.info(f"PROFILE (median/p95 over {len(_prof['tick_work'])} ticks): {parts}")
 
         sleep_time_s: float = control_interval - dt_s
         if sleep_time_s < 0:
@@ -580,6 +604,7 @@ def record(
                     display_data=cfg.display_data,
                     display_compressed_images=display_compressed_images,
                     subtasks=subtasks,
+                    profile=cfg.profile,
                 )
                 if subtasks is not None and not subtasks.complete:
                     msg = (f"only {subtasks.count}/{len(subtasks.descriptions)} subtask boundaries "
