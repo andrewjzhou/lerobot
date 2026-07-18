@@ -143,6 +143,13 @@ def init_keyboard_listener():
     events["rerecord_episode"] = False
     events["stop_recording"] = False
     events["advance_subtask"] = False
+    # EMERGENCY STOP: left+right pedal chord (opposing keys — never pressed
+    # together in normal use). Kills motor torque IMMEDIATELY where the arms
+    # stand: no shutdown-pose retreat (a retreat is motion; emergencies get
+    # none). The in-progress episode is discarded.
+    events["emergency_stop"] = False
+    estop_window_s = 0.4
+    last_press: dict = {}
 
     if is_headless():
         logging.warning(
@@ -156,7 +163,17 @@ def init_keyboard_listener():
 
     def on_press(key):
         try:
-            if key == keyboard.Key.right:
+            now = time.perf_counter()
+            other = {keyboard.Key.left: keyboard.Key.right,
+                     keyboard.Key.right: keyboard.Key.left}.get(key)
+            last_press[key] = now
+            if other is not None and now - last_press.get(other, -1e9) < estop_window_s:
+                print("EMERGENCY STOP (left+right chord): releasing torque immediately, NO retreat.")
+                events["emergency_stop"] = True
+                events["rerecord_episode"] = True   # discard the aborted episode
+                events["stop_recording"] = True
+                events["exit_early"] = True
+            elif key == keyboard.Key.right:
                 print("Right arrow key pressed. Exiting loop...")
                 events["exit_early"] = True
             elif key == keyboard.Key.left:

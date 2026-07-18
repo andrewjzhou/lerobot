@@ -499,6 +499,7 @@ def record(
 
     dataset = None
     listener = None
+    events: dict = {}
 
     try:
         if cfg.resume:
@@ -623,7 +624,9 @@ def record(
         # interrupted (Ctrl-C), the motors would be left enabled, actively
         # holding position, with the operator unable to move the arms.
         try:
-            if robot.is_connected and cfg.shutdown_poses_file:
+            if events.get("emergency_stop"):
+                logging.warning("EMERGENCY STOP: skipping shutdown-pose retreat, releasing torque in place.")
+            elif robot.is_connected and cfg.shutdown_poses_file:
                 try:
                     retreat_to_shutdown_poses(robot, cfg.shutdown_poses_file)
                 except Exception as e:
