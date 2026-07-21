@@ -106,6 +106,21 @@ class TrainPipelineConfig(HubMixin):
     save_checkpoint: bool = True
     # Checkpoint is saved every `save_freq` training iterations and after the last training step.
     save_freq: int = 20_000
+    # --- held-out validation (fork feature, see lerobot_train.run_validation) ---
+    # Hold out every Nth episode as a validation set (0 = validation off).
+    # The split is deterministic, so resumes reproduce it from this value alone.
+    val_episode_stride: int = 0
+    # Run validation every `val_freq` steps and at the final step. Keep it a
+    # multiple of save_freq so the best-val pointer lands on a saved checkpoint.
+    val_freq: int = 10_000
+    # Denoising/behavior-cloning loss is averaged over `val_batches` fixed
+    # batches; full-sampling action MSE over the first `val_action_mse_batches`
+    # of them (0 = skip the expensive MSE).
+    val_batches: int = 50
+    val_action_mse_batches: int = 16
+    # Fixed RNG seed for the val batch selection and noise/timestep draws, so
+    # the val curve is comparable across steps instead of drowning in noise.
+    val_seed: int = 1234
     use_policy_training_preset: bool = True
     optimizer: OptimizerConfig | None = None
     scheduler: LRSchedulerConfig | None = None

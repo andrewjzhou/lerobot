@@ -19,6 +19,7 @@ Requires: pip install 'lerobot[training]'  (includes dataset + accelerate + wand
 """
 
 import dataclasses
+import json
 import logging
 import time
 from contextlib import nullcontext
@@ -48,6 +49,7 @@ from lerobot.common.wandb_utils import WandBLogger
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets import EpisodeAwareSampler, compute_sampler_state, make_dataset
+from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from lerobot.envs import close_envs, make_env, make_env_pre_post_processors
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies import PreTrainedPolicy, make_policy, make_pre_post_processors
@@ -65,6 +67,84 @@ from lerobot.utils.utils import (
 )
 
 from .lerobot_eval import eval_policy_all
+
+
+def make_train_val_datasets(cfg: TrainPipelineConfig):
+    """Create the training dataset, holding out every `val_episode_stride`-th
+    episode as a validation set. Returns (train_dataset, val_dataset); the val
+    dataset is None when validation is off. The split is a pure function of
+    (total_episodes, val_episode_stride), so resumes reproduce it exactly."""
+    if cfg.val_episode_stride <= 0 or cfg.dataset.streaming:
+        return make_dataset(cfg), None
+    if cfg.dataset.episodes is not None:
+        raise ValueError("val_episode_stride requires dataset.episodes to be unset")
+    n_eps = LeRobotDatasetMetadata(
+        cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision
+    ).total_episodes
+    val_eps = list(range(0, n_eps, cfg.val_episode_stride))
+    try:
+        cfg.dataset.episodes = [i for i in range(n_eps) if i % cfg.val_episode_stride]
+        train_ds = make_dataset(cfg)
+        cfg.dataset.episodes = val_eps
+        val_ds = make_dataset(cfg)
+    finally:
+        # Keep the serialized config clean: the split re-derives from the stride.
+        cfg.dataset.episodes = None
+    logging.info(
+        f"Held-out validation: every {cfg.val_episode_stride}th episode -> "
+        f"{n_eps - len(val_eps)} train / {len(val_eps)} val episodes"
+    )
+    return train_ds, val_ds
+
+
+def run_validation(policy, preprocessor, val_dataset, cfg: TrainPipelineConfig, device):
+    """Evaluate the (unwrapped) policy on the held-out episodes.
+
+    Two metrics: the training objective on `val_batches` batches, and — the
+    honest overfitting signal — full-sampling action MSE (normalized units,
+    the policy's n_action_steps window) on the first `val_action_mse_batches`.
+    Batch selection and noise/timestep draws use a fixed seed so the curves
+    are comparable across steps.
+    """
+    g = torch.Generator().manual_seed(cfg.val_seed)
+    n_samples = min(cfg.val_batches * cfg.batch_size, len(val_dataset))
+    indices = torch.randperm(len(val_dataset), generator=g)[:n_samples].tolist()
+    loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=cfg.batch_size,
+        sampler=indices,
+        num_workers=min(cfg.num_workers, 4),
+        pin_memory=device.type == "cuda",
+        drop_last=False,
+        collate_fn=lerobot_collate_fn if val_dataset.meta.has_language_columns else None,
+    )
+    was_training = policy.training
+    policy.eval()
+    n_obs = getattr(policy.config, "n_obs_steps", 1)
+    losses, mses = [], []
+    fork_devices = [device] if device.type == "cuda" else []
+    with torch.no_grad(), torch.random.fork_rng(devices=fork_devices):
+        torch.manual_seed(cfg.val_seed)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(cfg.val_seed)
+        for bi, batch in enumerate(loader):
+            for key in val_dataset.meta.camera_keys:
+                if key in batch and batch[key].dtype == torch.uint8:
+                    batch[key] = batch[key].to(dtype=torch.float32) / 255.0
+            batch = preprocessor(batch)
+            loss, _ = policy.forward(batch)
+            losses.append(loss.item())
+            if bi < cfg.val_action_mse_batches and has_method(policy, "predict_action_chunk"):
+                pred = policy.predict_action_chunk(dict(batch))
+                start = n_obs - 1
+                target = batch["action"][:, start : start + pred.shape[1]]
+                mses.append(torch.mean((pred - target) ** 2).item())
+    if was_training:
+        policy.train()
+    metrics = {"loss": sum(losses) / len(losses)}
+    if mses:
+        metrics["action_mse"] = sum(mses) / len(mses)
+    return metrics
 
 
 def update_policy(
@@ -245,13 +325,13 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     # LeRobotDataset skips its snapshot_download when try_load() succeeds, so no rank re-downloads.
     if is_main_process:
         logging.info("Creating dataset")
-        dataset = make_dataset(cfg)
+        dataset, val_dataset = make_train_val_datasets(cfg)
 
     accelerator.wait_for_everyone()
 
     # Other ranks read from the shared copy populated by the main process.
     if not is_main_process:
-        dataset = make_dataset(cfg)
+        dataset, val_dataset = make_train_val_datasets(cfg)
 
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,
@@ -406,10 +486,26 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         # same permutation. accelerate then shards it disjointly across ranks via BatchSamplerShard
         # without needing a `generator` attribute to synchronize an RNG, and resume is sample-exact.
         shuffle = False
+        if dataset.episodes is None:
+            sampler_from = dataset.meta.episodes["dataset_from_index"]
+            sampler_to = dataset.meta.episodes["dataset_to_index"]
+        else:
+            # meta.episodes keeps ALL episodes with global frame ranges, while an
+            # episodes-filtered dataset indexes frames locally (the selected
+            # episodes concatenated in ascending episode order) — rebuild local
+            # boundaries or the sampler emits out-of-range keys.
+            fr = dataset.meta.episodes["dataset_from_index"]
+            to = dataset.meta.episodes["dataset_to_index"]
+            sampler_from, sampler_to, offset = [], [], 0
+            for ep in sorted(dataset.episodes):
+                length = int(to[ep]) - int(fr[ep])
+                sampler_from.append(offset)
+                offset += length
+                sampler_to.append(offset)
         sampler = EpisodeAwareSampler(
-            dataset.meta.episodes["dataset_from_index"],
-            dataset.meta.episodes["dataset_to_index"],
-            episode_indices_to_use=dataset.episodes,
+            sampler_from,
+            sampler_to,
+            episode_indices_to_use=None,  # boundaries above already cover exactly the loaded episodes
             drop_n_last_frames=getattr(active_cfg, "drop_n_last_frames", 0),
             shuffle=True,
             seed=cfg.seed if cfg.seed is not None else 0,
@@ -601,6 +697,46 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                     wandb_logger.log_policy(checkpoint_dir)
 
             accelerator.wait_for_everyone()
+
+        is_val_step = (
+            val_dataset is not None
+            and cfg.val_freq > 0
+            and (step % cfg.val_freq == 0 or step == cfg.steps)
+        )
+        if is_val_step and is_main_process:
+            val_metrics = run_validation(
+                accelerator.unwrap_model(policy), preprocessor, val_dataset, cfg, device
+            )
+            metric_key = "action_mse" if "action_mse" in val_metrics else "loss"
+            msg = f"Validation @ step {step}: " + "  ".join(
+                f"{k}={v:.5f}" for k, v in val_metrics.items()
+            )
+            logging.info(msg)
+            best_json = cfg.output_dir / "checkpoints" / "best.json"
+            best = json.loads(best_json.read_text()) if best_json.exists() else None
+            if best is None or val_metrics[metric_key] < best["metric"]:
+                checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+                if checkpoint_dir.exists():
+                    best = {"step": step, "metric": val_metrics[metric_key], "key": metric_key}
+                    best_link = checkpoint_dir.parent / "best"
+                    if best_link.is_symlink() or best_link.exists():
+                        best_link.unlink()
+                    best_link.symlink_to(checkpoint_dir.relative_to(checkpoint_dir.parent))
+                    best_json.parent.mkdir(parents=True, exist_ok=True)
+                    best_json.write_text(json.dumps(best))
+                    logging.info(
+                        f"New best val {metric_key}={best['metric']:.5f} -> checkpoints/best (step {step})"
+                    )
+                else:
+                    logging.warning(
+                        f"Val {metric_key} improved at step {step} but no checkpoint exists for this "
+                        "step — align val_freq with save_freq to track best weights."
+                    )
+            if wandb_logger:
+                wandb_val = dict(val_metrics)
+                if best is not None:
+                    wandb_val[f"best_{best['key']}"] = best["metric"]
+                wandb_logger.log_dict(wandb_val, step, mode="eval")
 
         if cfg.env and is_eval_step:
             if is_main_process:
