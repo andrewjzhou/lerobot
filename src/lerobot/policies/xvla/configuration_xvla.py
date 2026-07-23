@@ -84,6 +84,11 @@ class XVLAConfig(PreTrainedConfig):
     max_state_dim: int = 32
     max_action_dim: int = 20  # Maximum action dimension for padding (used by "auto" action mode)
     domain_feature_key: str | None = None
+    # Soft-prompt slot (0..num_domains-1) injected by XVLAAddDomainIdProcessorStep
+    # when domain_feature_key is unset. A NEW embodiment fine-tunes into one of
+    # the pretrained slots (strict checkpoint load — the table cannot grow);
+    # keep the SAME slot across warmup / fine-tune / deployment.
+    domain_id: int = 0
 
     # Vision preprocessing
     resize_imgs_with_padding: tuple[int, int] | None = None

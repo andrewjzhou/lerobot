@@ -400,6 +400,10 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             },
             "rename_observations_processor": {"rename_map": cfg.rename_map},
         }
+        if hasattr(policy.config, "domain_id"):
+            # XVLA soft-prompt slot: keep the checkpoint's processor pipeline in
+            # sync with the config (saved back out, so rollout inherits it too).
+            preprocessor_overrides["xvla_add_domain_id"] = {"domain_id": policy.config.domain_id}
         postprocessor_overrides = {
             "unnormalizer_processor": {
                 "stats": dataset.meta.stats,

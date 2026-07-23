@@ -172,6 +172,32 @@ class EE6DActionSpace(BaseActionSpace):
         return action
 
 
+@register_action("ee6d_cont")
+class EE6DContActionSpace(EE6DActionSpace):
+    """EE6D with a CONTINUOUS gripper channel in [0, 1].
+
+    For embodiments whose gripper genuinely parks mid-range (e.g. position-
+    commanded jaws squeezing deformable objects), a binary BCE gripper
+    mislabels the intermediate states. Targets are fractions of full open in
+    [0, 1]; the loss is MSE through a sigmoid so train and deploy share the
+    same bounded mapping (postprocess sigmoid inherited from EE6D). Pose
+    channels and conditioning behavior are identical to ee6d, so a pretrained
+    ee6d checkpoint fine-tunes into this space without weight surgery (the
+    action heads are domain-keyed).
+    """
+
+    GRIPPER_SCALE = 5.0
+
+    def compute_loss(self, pred, target):
+        losses = super().compute_loss(pred, target)
+        g_losses = [
+            self.mse(torch.sigmoid(pred[:, :, gi]), target[:, :, gi])
+            for gi in self.gripper_idx
+        ]
+        losses["gripper_loss"] = sum(g_losses) / len(self.gripper_idx) * self.GRIPPER_SCALE
+        return losses
+
+
 @register_action("joint")
 class JointActionSpace(BaseActionSpace):
     """Joint-space layout with joints + gripper only."""
