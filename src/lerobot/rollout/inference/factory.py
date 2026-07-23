@@ -62,6 +62,15 @@ class InferenceEngineConfig(draccus.ChoiceRegistry, abc.ABC):
 class SyncInferenceConfig(InferenceEngineConfig):
     """Inline synchronous inference (one policy call per control tick)."""
 
+    # Optional action-space adapter, as a "module.path:factory_fn" import
+    # string. The factory is called with (dataset_features, ordered_action_keys)
+    # and must return an object with adapt_observation(obs_frame),
+    # adapt_action(action_tensor, obs_frame) and reset(). Lets a policy whose
+    # action/state space differs from the robot's (e.g. end-effector-space
+    # VLAs needing IK back to joints) deploy without coupling the engine to
+    # any robot-specific kinematics.
+    action_adapter: str | None = None
+
 
 @InferenceEngineConfig.register_subclass("rtc")
 @dataclass
@@ -99,6 +108,20 @@ def create_inference_engine(
     """Instantiate the appropriate inference engine from a config object."""
     logger.info("Creating inference engine: %s", config.type)
     if isinstance(config, SyncInferenceConfig):
+        action_adapter = None
+        if config.action_adapter:
+            import importlib
+
+            mod_name, _, fn_name = config.action_adapter.partition(":")
+            if not fn_name:
+                raise ValueError(
+                    f"action_adapter must be 'module.path:factory_fn', got {config.action_adapter!r}"
+                )
+            factory_fn = getattr(importlib.import_module(mod_name), fn_name)
+            action_adapter = factory_fn(
+                dataset_features=dataset_features, ordered_action_keys=ordered_action_keys
+            )
+            logger.info("Sync action adapter: %s", config.action_adapter)
         return SyncInferenceEngine(
             policy=policy,
             preprocessor=preprocessor,
@@ -108,6 +131,7 @@ def create_inference_engine(
             task=task,
             device=device,
             robot_type=robot_wrapper.robot_type,
+            action_adapter=action_adapter,
         )
     if isinstance(config, RTCInferenceConfig):
         return RTCInferenceEngine(

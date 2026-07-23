@@ -64,6 +64,7 @@ class SyncInferenceEngine(InferenceEngine):
         task: str,
         device: str | None,
         robot_type: str,
+        action_adapter=None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -73,6 +74,11 @@ class SyncInferenceEngine(InferenceEngine):
         self._task = task
         self._device = torch.device(device or "cpu")
         self._robot_type = robot_type
+        # Optional action-space adapter (see SyncInferenceConfig.action_adapter):
+        # adapt_observation maps the robot-space observation into the policy's
+        # observation space; adapt_action maps the policy's action back into
+        # robot-space (e.g. end-effector pose -> joint targets via IK).
+        self._action_adapter = action_adapter
         logger.info(
             "SyncInferenceEngine initialized (device=%s, action_keys=%d)",
             self._device,
@@ -93,6 +99,8 @@ class SyncInferenceEngine(InferenceEngine):
         self._policy.reset()
         self._preprocessor.reset()
         self._postprocessor.reset()
+        if self._action_adapter is not None:
+            self._action_adapter.reset()
 
     def get_action(self, obs_frame: dict | None) -> torch.Tensor | None:
         """Run the full inference pipeline on ``obs_frame`` and return an action tensor."""
@@ -102,6 +110,8 @@ class SyncInferenceEngine(InferenceEngine):
         # ``obs_frame`` fresh per tick via ``build_dataset_frame``, so the
         # tensor/array values are not shared with any other reader.
         observation = copy(obs_frame)
+        if self._action_adapter is not None:
+            observation = self._action_adapter.adapt_observation(observation)
         autocast_ctx = (
             torch.autocast(device_type=self._device.type)
             if self._device.type == "cuda" and self._policy.config.use_amp
@@ -115,6 +125,8 @@ class SyncInferenceEngine(InferenceEngine):
             action = self._policy.select_action(observation)
             action = self._postprocessor(action)
         action_tensor = action.squeeze(0).cpu()
+        if self._action_adapter is not None:
+            action_tensor = self._action_adapter.adapt_action(action_tensor, obs_frame)
 
         # Reorder to match dataset action ordering so the caller can treat
         # the returned tensor uniformly across backends.
