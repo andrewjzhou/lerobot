@@ -115,6 +115,19 @@ class DiffusionConfig(PreTrainedConfig):
     # which avoids excessive padding and leads to improved training results.
     drop_n_last_frames: int = 7  # horizon - n_action_steps - n_obs_steps + 1
 
+    # --- Relative actions (OpenPI DeltaActions pattern) ---
+    # Train on action - current_state offsets instead of absolute targets.
+    # Requires state and action to share the same layout/names (e.g. an
+    # ee6d dataset where observation.state == action space). The conversion
+    # runs AFTER normalization (and inverts BEFORE unnormalization), so the
+    # offsets are in normalized units and the algebra is exact. Deployment:
+    # RTC engine is relative-aware; the sync engine rejects relative policies.
+    use_relative_actions: bool = False
+    # Names to keep absolute (token match against action_feature_names).
+    relative_exclude_joints: list[str] = field(default_factory=list)
+    # Per-dim action names (from the dataset card) used to build the mask.
+    action_feature_names: list[str] | None = None
+
     # --- Current-as-touch additions (arXiv 2607.03529) ---
     # Extra STATE-type input features concatenated to observation.state in the
     # global conditioning (e.g. ["observation.current"]). They receive the same

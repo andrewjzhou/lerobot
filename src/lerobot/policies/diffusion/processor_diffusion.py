@@ -19,11 +19,13 @@ from typing import Any
 import torch
 
 from lerobot.processor import (
+    AbsoluteActionsProcessorStep,
     AddBatchDimensionProcessorStep,
     DeviceProcessorStep,
     NormalizerProcessorStep,
     PolicyAction,
     PolicyProcessorPipeline,
+    RelativeActionsProcessorStep,
     RenameObservationsProcessorStep,
     UnnormalizerProcessorStep,
     policy_action_to_transition,
@@ -64,6 +66,16 @@ def make_diffusion_pre_post_processors(
         A tuple containing the configured pre-processor and post-processor pipelines.
     """
 
+    # Relative actions (OpenPI DeltaActions): placed AFTER the normalizer on
+    # the way in and BEFORE the unnormalizer on the way out, so offsets live
+    # in normalized units and the round trip is algebraically exact. The step
+    # pair is always present (disabled by default) so saved processor JSONs
+    # stay structurally identical across configs.
+    relative_step = RelativeActionsProcessorStep(
+        enabled=config.use_relative_actions,
+        exclude_joints=list(config.relative_exclude_joints),
+        action_names=config.action_feature_names,
+    )
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
@@ -73,8 +85,12 @@ def make_diffusion_pre_post_processors(
             norm_map=config.normalization_mapping,
             stats=dataset_stats,
         ),
+        relative_step,
     ]
     output_steps = [
+        AbsoluteActionsProcessorStep(
+            enabled=config.use_relative_actions, relative_step=relative_step
+        ),
         UnnormalizerProcessorStep(
             features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats
         ),
