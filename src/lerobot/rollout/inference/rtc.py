@@ -146,6 +146,7 @@ class RTCInferenceEngine(InferenceEngine):
             )
 
         # Processor introspection for relative-action re-anchoring.
+        self._action_adapter = None
         self._relative_step = next(
             (s for s in preprocessor.steps if isinstance(s, RelativeActionsProcessorStep) and s.enabled),
             None,
@@ -232,12 +233,24 @@ class RTCInferenceEngine(InferenceEngine):
                 logger.exception("Could not seed first-chunk blend (continuing without)")
         self._policy_active.set()
 
+    def set_action_adapter(self, adapter) -> None:
+        """Optional action-space adapter (see SyncInferenceConfig.action_adapter):
+        adapt_observation maps each robot-space obs frame into the policy's
+        space; adapt_chunk maps a postprocessed action chunk back to
+        robot-space rows before it enters the queue. When set, the prev-chunk
+        reanchoring path is skipped (converted leftovers are no longer in
+        policy space; adapter-based policies must ignore prev_chunk_left_over).
+        """
+        self._action_adapter = adapter
+
     def reset(self) -> None:
         """Reset the policy, processors, and action queue."""
         logger.info("Resetting RTC inference state (policy + processors + queue)")
         self._policy.reset()
         self._preprocessor.reset()
         self._postprocessor.reset()
+        if self._action_adapter is not None:
+            self._action_adapter.reset()
         if self._action_queue is not None:
             self._action_queue.clear()
         with self._obs_lock:
@@ -307,6 +320,8 @@ class RTCInferenceEngine(InferenceEngine):
                             frames = []
                             for o in window:
                                 fb = build_dataset_frame(self._hw_features, o, prefix="observation")
+                                if self._action_adapter is not None:
+                                    fb = self._action_adapter.adapt_observation(fb)
                                 fb = prepare_observation_for_inference(
                                     fb, policy_device, self._task, self._robot.robot_type
                                 )
@@ -320,13 +335,16 @@ class RTCInferenceEngine(InferenceEngine):
                             preprocessed["task"] = [self._task]
                         else:
                             obs_batch = build_dataset_frame(self._hw_features, obs, prefix="observation")
+                            if self._action_adapter is not None:
+                                obs_batch = self._action_adapter.adapt_observation(obs_batch)
                             obs_batch = prepare_observation_for_inference(
                                 obs_batch, policy_device, self._task, self._robot.robot_type
                             )
                             obs_batch["task"] = [self._task]
                             preprocessed = self._preprocessor(obs_batch)
 
-                        if prev_actions is not None and self._relative_step is not None:
+                        if (prev_actions is not None and self._relative_step is not None
+                                and self._action_adapter is None):
                             # Rebase against the raw cached state so the leftover tail stays in
                             # the training-time coordinate frame.
                             raw_state = self._relative_step.get_cached_state()
@@ -352,6 +370,8 @@ class RTCInferenceEngine(InferenceEngine):
 
                         original = actions.squeeze(0).clone()
                         processed = self._postprocessor(actions).squeeze(0)
+                        if self._action_adapter is not None:
+                            processed = self._action_adapter.adapt_chunk(processed)
                         new_latency = time.perf_counter() - current_time
                         new_delay = math.ceil(new_latency / time_per_chunk)
 

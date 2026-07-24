@@ -81,11 +81,24 @@ class RTCInferenceConfig(InferenceEngineConfig):
     # (e.g. ``--inference.rtc.execution_horizon=...``).
     rtc: RTCConfig = field(default_factory=RTCConfig)
     queue_threshold: int = 30
+    # Same contract as SyncInferenceConfig.action_adapter, applied chunk-wise.
+    action_adapter: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
+
+
+def _resolve_action_adapter(spec: str, dataset_features: dict, ordered_action_keys: list):
+    import importlib
+
+    mod_name, _, fn_name = spec.partition(":")
+    if not fn_name:
+        raise ValueError(f"action_adapter must be 'module.path:factory_fn', got {spec!r}")
+    factory_fn = getattr(importlib.import_module(mod_name), fn_name)
+    logger.info("Action adapter: %s", spec)
+    return factory_fn(dataset_features=dataset_features, ordered_action_keys=ordered_action_keys)
 
 
 def create_inference_engine(
@@ -110,18 +123,8 @@ def create_inference_engine(
     if isinstance(config, SyncInferenceConfig):
         action_adapter = None
         if config.action_adapter:
-            import importlib
-
-            mod_name, _, fn_name = config.action_adapter.partition(":")
-            if not fn_name:
-                raise ValueError(
-                    f"action_adapter must be 'module.path:factory_fn', got {config.action_adapter!r}"
-                )
-            factory_fn = getattr(importlib.import_module(mod_name), fn_name)
-            action_adapter = factory_fn(
-                dataset_features=dataset_features, ordered_action_keys=ordered_action_keys
-            )
-            logger.info("Sync action adapter: %s", config.action_adapter)
+            action_adapter = _resolve_action_adapter(
+                config.action_adapter, dataset_features, ordered_action_keys)
         return SyncInferenceEngine(
             policy=policy,
             preprocessor=preprocessor,
@@ -134,7 +137,7 @@ def create_inference_engine(
             action_adapter=action_adapter,
         )
     if isinstance(config, RTCInferenceConfig):
-        return RTCInferenceEngine(
+        engine = RTCInferenceEngine(
             policy=policy,
             preprocessor=preprocessor,
             postprocessor=postprocessor,
@@ -149,4 +152,8 @@ def create_inference_engine(
             rtc_queue_threshold=config.queue_threshold,
             shutdown_event=shutdown_event,
         )
+        if config.action_adapter:
+            engine.set_action_adapter(_resolve_action_adapter(
+                config.action_adapter, dataset_features, ordered_action_keys))
+        return engine
     raise ValueError(f"Unknown inference engine type: {type(config).__name__}")
