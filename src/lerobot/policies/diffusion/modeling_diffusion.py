@@ -123,7 +123,7 @@ class DiffusionPolicy(PreTrainedPolicy):
                 for key in self.config.image_features:
                     if batch[key].ndim == 4:
                         batch[key] = batch[key].unsqueeze(1)
-                batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
+                batch[OBS_IMAGES] = self._stack_views(batch)
         actions = self.diffusion.generate_actions(batch, noise=noise)
         return actions
 
@@ -155,7 +155,7 @@ class DiffusionPolicy(PreTrainedPolicy):
 
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
+            batch[OBS_IMAGES] = self._stack_views(batch)
         # NOTE: It's important that this happens after stacking the images into a single key.
         self._queues = populate_queues(self._queues, batch)
 
@@ -166,6 +166,30 @@ class DiffusionPolicy(PreTrainedPolicy):
         action = self._queues[ACTION].popleft()
         return action
 
+    def _stack_views(self, batch: dict[str, Tensor]) -> Tensor:
+        """Stack conditioning views along dim=-4.
+
+        Default: the raw image_features. With config.virtual_views set, each
+        view is a (cropped) window of a source camera, resized to
+        resize_shape so all views share one shape for the shared encoder.
+        """
+        import torchvision.transforms.v2.functional as TVF
+
+        if not self.config.virtual_views:
+            return torch.stack([batch[key] for key in self.config.image_features], dim=-4)
+        views = []
+        for spec in self.config.virtual_views.values():
+            img = batch[spec["source"]]
+            crop = spec.get("crop")
+            if crop:
+                img = img[..., crop[0]:crop[2], crop[1]:crop[3]]
+            if self.config.resize_shape is not None and tuple(img.shape[-2:]) != tuple(
+                self.config.resize_shape
+            ):
+                img = TVF.resize(img, list(self.config.resize_shape), antialias=True)
+            views.append(img)
+        return torch.stack(views, dim=-4)
+
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
         """Run the batch through the model and compute the loss for training or validation."""
         if self.config.image_features:
@@ -173,7 +197,7 @@ class DiffusionPolicy(PreTrainedPolicy):
             for key in self.config.image_features:
                 if self.config.n_obs_steps == 1 and batch[key].ndim == 4:
                     batch[key] = batch[key].unsqueeze(1)
-            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
+            batch[OBS_IMAGES] = self._stack_views(batch)
         loss, output_dict = self.diffusion.compute_loss(batch)
         return loss, output_dict
 
@@ -203,7 +227,9 @@ class DiffusionModel(nn.Module):
         for key in self.config.extra_state_keys:
             global_cond_dim += self.config.input_features[key].shape[0]
         if self.config.image_features:
-            num_images = len(self.config.image_features)
+            num_images = (len(self.config.virtual_views)
+                          if self.config.virtual_views else
+                          len(self.config.image_features))
             if self.config.use_separate_rgb_encoder_per_camera:
                 encoders = [DiffusionRgbEncoder(config) for _ in range(num_images)]
                 self.rgb_encoder = nn.ModuleList(encoders)

@@ -115,6 +115,15 @@ class DiffusionConfig(PreTrainedConfig):
     # which avoids excessive padding and leads to improved training results.
     drop_n_last_frames: int = 7  # horizon - n_action_steps - n_obs_steps + 1
 
+    # --- Virtual views (config-driven crops of the source cameras) ---
+    # When set, the conditioning views are built from these specs instead of
+    # the raw image_features: {view_name: {source: <image feature key>,
+    # crop: [y0, x0, y1, x1] | null}}. Crops are pixel boxes on the SOURCE
+    # frame; every view is then resized to resize_shape before the shared
+    # encoder, so mixed crop sizes are fine. Runs identically at train and
+    # deploy (serialized with the checkpoint) — no dataset rebuild needed.
+    virtual_views: dict[str, dict] | None = None
+
     # --- Relative actions (OpenPI DeltaActions pattern) ---
     # Train on action - current_state offsets instead of absolute targets.
     # Requires state and action to share the same layout/names (e.g. an
