@@ -253,6 +253,17 @@ class DiffusionModel(nn.Module):
                 nn.Linear(128, aux_dim * config.n_obs_steps),
             )
 
+        # Progress head: predicts normalized steps-till-completion from the
+        # global conditioning (one scalar per obs step). Trained as an aux
+        # loss; at inference generate_actions() stashes the last-step value
+        # on the policy for the rollout engine's stage-transition logic.
+        if config.progress_aux_weight > 0:
+            self.progress_head = nn.Sequential(
+                nn.Linear(global_cond_dim * config.n_obs_steps, 128),
+                nn.ReLU(),
+                nn.Linear(128, config.n_obs_steps),
+            )
+
         if config.compile_model:
             # Compile the U-Net. "reduce-overhead" is preferred for the small-batch repetitive loops
             # common in diffusion inference.
@@ -368,6 +379,12 @@ class DiffusionModel(nn.Module):
         # Encode image features and concatenate them all together along with the state vector.
         global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
 
+        # Progress readout (normalized units): stash the current-step value
+        # for the rollout engine; costs one tiny MLP forward per generation.
+        if hasattr(self, "progress_head"):
+            self._last_progress_norm = float(
+                self.progress_head(global_cond)[0, -1].detach())
+
         # run sampling
         actions = self.conditional_sample(batch_size, global_cond=global_cond, noise=noise)
 
@@ -445,11 +462,20 @@ class DiffusionModel(nn.Module):
         else:
             loss = loss.mean()
 
+        denoise_loss = loss
+        aux_terms: dict[str, float] = {}
         if self.config.current_aux_weight > 0:
             target = batch[self.config.current_aux_key].flatten(start_dim=1)
-            aux_loss = F.mse_loss(self.current_aux_head(global_cond), target)
-            total = loss + self.config.current_aux_weight * aux_loss
-            return total, {"denoise_loss": loss.item(), "current_aux_loss": aux_loss.item()}
+            aux = F.mse_loss(self.current_aux_head(global_cond), target)
+            aux_terms["current_aux_loss"] = aux.item()
+            loss = loss + self.config.current_aux_weight * aux
+        if self.config.progress_aux_weight > 0:
+            target = batch[self.config.progress_aux_key].flatten(start_dim=1)
+            aux = F.mse_loss(self.progress_head(global_cond), target)
+            aux_terms["progress_aux_loss"] = aux.item()
+            loss = loss + self.config.progress_aux_weight * aux
+        if aux_terms:
+            return loss, {"denoise_loss": denoise_loss.item(), **aux_terms}
 
         return loss, None
 

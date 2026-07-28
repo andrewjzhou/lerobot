@@ -122,6 +122,10 @@ class RTCInferenceEngine(InferenceEngine):
 
         self._action_queue: ActionQueue | None = None
         self._obs_holder: dict[str, Any] = {}
+        # Latest progress-head readout in raw units ([-1, 0], 0 = subtask
+        # complete); None when the policy has no progress head. Updated once
+        # per replan; consumed by stage-transition logic.
+        self.last_progress: float | None = None
         # Policies with n_obs_steps > 1 (e.g. diffusion) were trained on
         # consecutive-tick observation windows; keep the last n raw
         # observations (notify_observation ticks at the control rate) and
@@ -367,6 +371,18 @@ class RTCInferenceEngine(InferenceEngine):
                         actions = self._policy.predict_action_chunk(
                             preprocessed, inference_delay=delay, prev_chunk_left_over=prev_actions
                         )
+
+                        # Progress readout (policies with a progress head).
+                        # The head trains on MIN_MAX-normalized targets whose
+                        # stats are exactly min=-1/max=0 by construction, so
+                        # norm = 2x + 1 and the inverse is fixed: x=(norm-1)/2.
+                        p_norm = getattr(
+                            getattr(self._policy, "diffusion", self._policy),
+                            "_last_progress_norm", None)
+                        if p_norm is not None:
+                            self.last_progress = (p_norm - 1.0) / 2.0
+                            logger.info("progress %.3f (0 = subtask complete)",
+                                        self.last_progress)
 
                         original = actions.squeeze(0).clone()
                         processed = self._postprocessor(actions).squeeze(0)

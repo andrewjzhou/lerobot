@@ -149,6 +149,18 @@ class DiffusionConfig(PreTrainedConfig):
     current_aux_weight: float = 0.0
     current_aux_key: str = "observation.current_smooth"
 
+    # --- Progress head (per-subtask completion signal) ---
+    # weight > 0 adds a small MLP head on the global conditioning predicting
+    # `progress_aux_key`: steps-till-completion normalized to [-1, 0]
+    # (a per-frame dataset column; -1 = episode start, 0 = final frame).
+    # Same contract as current_aux: the key must be a declared input feature
+    # (so the preprocessor normalizes it) but is NEVER fed to the
+    # conditioning. At inference generate_actions stashes the prediction on
+    # the policy as `_last_progress_norm`; the RTC engine reads it per
+    # replan for stage-transition detection.
+    progress_aux_weight: float = 0.0
+    progress_aux_key: str = "observation.progress"
+
     # Architecture / modeling.
     # Vision backbone.
     vision_backbone: str = "resnet18"
