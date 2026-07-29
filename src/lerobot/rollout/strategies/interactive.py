@@ -16,8 +16,9 @@
 
 Number keys 1..N smoothly move the follower to named poses (from a poses
 yaml), 'g' starts policy inference, 's' stops it (robot holds position),
-'q'/ESC ends the session. ``duration`` acts as a per-inference-run cap
-(0 = until 's'). No data recording.
+'o' while idle partially opens the gripper (to free a piece held at stop
+time), 'q'/ESC ends the session. ``duration`` acts as a per-inference-run
+cap (0 = until 's'). No data recording.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from lerobot.common.control_utils import move_robot_to_named_pose
+from lerobot.common.control_utils import follower_smooth_move_to, move_robot_to_named_pose
 from lerobot.utils.robot_utils import precise_sleep
 
 from ..context import RolloutContext
@@ -82,7 +83,8 @@ class InteractiveStrategy(BaseStrategy):
             logger.info("debug logs -> %s", self._session_dir)
         keymap = " | ".join(f"{i + 1}={n}" for i, n in enumerate(self._pose_names))
         logger.info("Interactive strategy ready — %s | g=start inference | "
-                    "s=stop | q/ESC=quit", keymap)
+                    "s=stop | o=open gripper %.0f%% | q/ESC=quit",
+                    keymap, cfg.open_gripper_fraction * 100)
 
     def run(self, ctx: RolloutContext) -> None:
         robot = ctx.hardware.robot_wrapper
@@ -101,8 +103,42 @@ class InteractiveStrategy(BaseStrategy):
                 logger.info("at pose '%s' — g to start inference", name)
             elif k == "g":
                 self._run_inference(ctx)
+            elif k == "o":
+                self._open_gripper(robot)
             else:
                 time.sleep(0.05)
+
+    def _open_gripper(self, robot) -> None:
+        """'o' while idle: partially open the gripper so a piece gripped at
+        stop time can be pried out. Bimanual robots open the LEFT gripper
+        (the tool that actually grips). Opens only — if the jaw is already
+        past the target it stays put. All other joints hold position."""
+        if hasattr(robot, "get_pos_observation"):
+            obs = dict(robot.get_pos_observation())
+        else:
+            obs = {k: v for k, v in robot.get_observation().items()
+                   if k.endswith(".pos")}
+        grips = sorted(k for k in obs if "gripper" in k and k.endswith(".pos"))
+        key = next((k for k in grips if k.startswith("left_")),
+                   grips[0] if grips else None)
+        if key is None:
+            logger.warning("'o': no gripper joint in observation")
+            return
+        # OpenArm v2 mirrored grippers: left opens toward +65, right -65.
+        open_deg = -65.0 if key.startswith("right_") else 65.0
+        frac = self.config.open_gripper_fraction
+        target_deg = frac * open_deg
+        cur = float(obs[key])
+        if (target_deg - cur) * (1.0 if open_deg > 0 else -1.0) <= 0:
+            logger.info("'o': %s already at %+.1f deg (>= %.0f%% open) — "
+                        "leaving it", key, cur, frac * 100)
+            return
+        logger.info("opening %s to %.0f%% (%+.1f deg)...", key, frac * 100,
+                    target_deg)
+        target = dict(obs)
+        target[key] = target_deg
+        follower_smooth_move_to(robot, obs, target, duration_s=1.0, fps=30)
+        logger.info("gripper opened — number keys to repose, g to rerun")
 
     def _run_inference(self, ctx: RolloutContext) -> None:
         engine = self._engine

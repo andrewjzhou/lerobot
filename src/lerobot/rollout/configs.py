@@ -62,13 +62,17 @@ class BaseStrategyConfig(RolloutStrategyConfig):
 @dataclass
 class InteractiveStrategyConfig(RolloutStrategyConfig):
     """Keyed operation: number keys 1..N move the follower to named poses,
-    'g' starts policy inference, 's' stops it (robot holds), 'q'/ESC ends
+    'g' starts policy inference, 's' stops it (robot holds), 'o' (while
+    idle) partially opens the gripper to free a held piece, 'q'/ESC ends
     the session. No data recording."""
 
     # comma-separated pose names from poses_file, mapped to keys 1..N (max 5)
     poses: str = "ready"
     poses_file: str = "configs/poses.yaml"
     move_duration_s: float = 4.0
+    # 'o' opens the (left) gripper to this fraction of fully open — enough
+    # to pry a gripped piece out after stopping mid-grasp. Never closes.
+    open_gripper_fraction: float = 0.25
     # When set, each inference run (every 'g' press) logs states/actions/loop
     # timing at full rate and raw camera frames at reduced rate into
     # <log_dir>/<session>/runNN/ for offline diagnosis. Empty = off.
