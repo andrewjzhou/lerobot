@@ -69,7 +69,13 @@ class InteractiveStrategyConfig(RolloutStrategyConfig):
     # comma-separated pose names from poses_file, mapped to keys 1..N (max 5)
     poses: str = "ready"
     poses_file: str = "configs/poses.yaml"
-    move_duration_s: float = 4.0
+    # Pose-move pacing: duration = worst-case EE arc / pose_speed_m_s,
+    # approximated as max joint delta x a 0.6 m lever arm (full reach),
+    # clamped to [pose_min_duration_s, move_duration_s]. Set
+    # pose_speed_m_s: 0 to always use the fixed move_duration_s.
+    move_duration_s: float = 4.0    # upper cap
+    pose_speed_m_s: float = 0.3
+    pose_min_duration_s: float = 0.5
     # 'o' opens the (left) gripper to this fraction of fully open — enough
     # to pry a gripped piece out after stopping mid-grasp. Never closes.
     open_gripper_fraction: float = 0.25
@@ -100,6 +106,10 @@ class StagedStrategyConfig(InteractiveStrategyConfig):
     # settle. 's' still stops the whole chain; ESC quits.
     auto_advance: bool = False
     advance_settle_s: float = 0.5
+    # After a chain completes ALL stages: move to this pose (name from
+    # poses_file; empty = stay put) and re-select stage 1. Not applied when
+    # the chain is stopped with 's' or quit.
+    chain_end_pose: str = "ready"
 
 
 @RolloutStrategyConfig.register_subclass("sentry")

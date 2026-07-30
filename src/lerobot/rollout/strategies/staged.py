@@ -183,6 +183,14 @@ class StagedStrategy(InteractiveStrategy):
             if self._active + 1 >= len(self._stages):
                 logger.info("=== chain complete (all %d stages) ===",
                             len(self._stages))
+                end_pose = self.config.chain_end_pose
+                if end_pose:
+                    if end_pose in self._poses:
+                        self._goto_pose(ctx.hardware.robot_wrapper, end_pose)
+                    else:
+                        logger.warning("chain_end_pose %r not in poses file",
+                                       end_pose)
+                self._select(0)   # next chain starts from stage 1
                 break
             time.sleep(self.config.advance_settle_s)
             self._select(self._active + 1)
@@ -190,8 +198,6 @@ class StagedStrategy(InteractiveStrategy):
 
     def run(self, ctx: RolloutContext) -> None:
         import time
-
-        from lerobot.common.control_utils import move_robot_to_named_pose
 
         robot = ctx.hardware.robot_wrapper
         while not ctx.runtime.shutdown_event.is_set():
@@ -201,12 +207,7 @@ class StagedStrategy(InteractiveStrategy):
                 break
             elif k and k.isdigit() and 1 <= (10 if k == "0" else int(k)) <= len(self._pose_names):
                 name = self._pose_names[(10 if k == "0" else int(k)) - 1]
-                logger.info("moving to pose '%s'...", name)
-                move_robot_to_named_pose(robot, self._poses, name,
-                                         duration_s=self.config.move_duration_s,
-                                         side=self._side)
-                self._last_pose = name
-                logger.info("at pose '%s'", name)
+                self._goto_pose(robot, name)
                 self._announce()
             elif k is not None and k in MODEL_KEYS and MODEL_KEYS.index(k) < len(self._stages):
                 self._select(MODEL_KEYS.index(k))

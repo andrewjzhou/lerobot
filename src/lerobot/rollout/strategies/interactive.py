@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from collections import deque
 from datetime import datetime
@@ -119,12 +120,7 @@ class InteractiveStrategy(BaseStrategy):
                 break
             elif k and k.isdigit() and 1 <= (10 if k == "0" else int(k)) <= len(self._pose_names):
                 name = self._pose_names[(10 if k == "0" else int(k)) - 1]
-                logger.info("moving to pose '%s'...", name)
-                move_robot_to_named_pose(robot, self._poses, name,
-                                         duration_s=self.config.move_duration_s,
-                                         side=self._side)
-                self._last_pose = name
-                logger.info("at pose '%s' — g to start inference", name)
+                self._goto_pose(robot, name)
             elif k == "g":
                 self._run_inference(ctx)
             elif k == "o":
@@ -163,6 +159,49 @@ class InteractiveStrategy(BaseStrategy):
         target[key] = target_deg
         follower_smooth_move_to(robot, obs, target, duration_s=1.0, fps=30)
         logger.info("gripper opened — number keys to repose, g to rerun")
+
+    # Worst-case EE lever arm for translating pose_speed_m_s into a joint
+    # sweep duration (arm at full reach; shorter postures move slower than
+    # the configured EE speed, which errs safe).
+    POSE_LEVER_ARM_M = 0.6
+
+    def _pose_duration(self, current: dict, target: dict) -> float:
+        cfg = self.config
+        if cfg.pose_speed_m_s <= 0:
+            return cfg.move_duration_s
+        deltas = [abs(target[k] - current[k]) for k in target
+                  if k in current and not k.endswith("gripper.pos")]
+        max_rad = math.radians(max(deltas, default=0.0))
+        dur = max_rad * self.POSE_LEVER_ARM_M / cfg.pose_speed_m_s
+        return min(max(dur, cfg.pose_min_duration_s), cfg.move_duration_s)
+
+    def _spline_abort_check(self) -> bool:
+        """Polled during pose moves: 's' aborts (robot holds); quit keys
+        abort AND stay queued so the outer loop exits. Other keys typed
+        mid-move are discarded — they were not meant for the new pose."""
+        while self._keys:
+            k = self._keys.popleft()
+            if k == "s":
+                return True
+            if k in self.QUIT_KEYS:
+                self._keys.appendleft(k)
+                return True
+        return False
+
+    def _goto_pose(self, robot, name: str) -> bool:
+        """Speed-scaled, operator-stoppable move to a named pose.
+        Returns True if it was aborted."""
+        logger.info("moving to pose '%s'...", name)
+        aborted = move_robot_to_named_pose(
+            robot, self._poses, name, fps=30, side=self._side,
+            abort_check=self._spline_abort_check,
+            duration_fn=self._pose_duration)
+        if aborted:
+            logger.info("pose move to '%s' STOPPED — holding position", name)
+        else:
+            self._last_pose = name
+            logger.info("at pose '%s'", name)
+        return aborted
 
     def _inference_duration(self, cfg) -> float:
         """Per-run cap in seconds; staged mode returns the active stage's."""

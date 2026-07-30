@@ -315,8 +315,9 @@ def teleop_smooth_move_to(teleop, target_pos: dict, duration_s: float = 2.0, fps
 
 
 def follower_smooth_move_to(
-    robot, current: dict, target: dict, duration_s: float = 1.0, fps: int = 30
-) -> None:
+    robot, current: dict, target: dict, duration_s: float = 1.0, fps: int = 30,
+    *, abort_check=None,
+) -> bool:
     """Smoothly move the follower robot from ``current`` to ``target`` action.
 
     Used when the teleop is non-actuated: instead of driving the leader arm to
@@ -325,14 +326,23 @@ def follower_smooth_move_to(
 
     Both ``current`` and ``target`` must be in the robot action key space
     (i.e. the output of ``robot_action_processor``).
+
+    ``abort_check`` (optional, polled every tick) lets the operator stop a
+    move mid-spline: the robot HOLDS at the last commanded point (PD keeps
+    position; nothing further is sent). Returns True if aborted.
     """
     steps = max(int(duration_s * fps), 1)
 
     for step in range(steps + 1):
+        if abort_check is not None and abort_check():
+            logging.info("pose move aborted at %.0f%% — holding position",
+                         100 * step / steps)
+            return True
         t = step / steps
         interp = {k: current[k] * (1 - t) + target[k] * t if k in target else current[k] for k in current}
         robot.send_action(interp)
         time.sleep(1 / fps)
+    return False
 
 
 def retreat_to_shutdown_poses(robot, poses_file: str) -> None:
@@ -377,13 +387,19 @@ def retreat_to_shutdown_poses(robot, poses_file: str) -> None:
 
 
 def move_robot_to_named_pose(robot, poses: dict, name: str, duration_s: float = 4.0,
-                             fps: int = 30, side: str | None = None) -> None:
+                             fps: int = 30, side: str | None = None,
+                             *, abort_check=None, duration_fn=None) -> bool:
     """Smoothly move follower(s) to a named pose entry (degrees):
     ``{name: {side: {joint_1.pos: ..., gripper.pos: ...}}}``.
 
     Handles bimanual (left_/right_-prefixed keys) and single-arm robots;
     keys without a saved value hold their current position. For single-arm
     robots pass ``side`` (else the pose entry's only side is used).
+
+    ``duration_fn(current, target) -> seconds`` overrides ``duration_s``
+    (e.g. distance-scaled speeds); ``abort_check`` makes the move
+    operator-stoppable (see follower_smooth_move_to). Returns True if
+    aborted.
     """
     entry = poses[name]
     # Positions only when the robot supports it — pose moves (incl. shutdown
@@ -405,4 +421,7 @@ def move_robot_to_named_pose(robot, poses: dict, name: str, duration_s: float = 
         for k, v in entry.get(s, {}).items():
             if k in target:
                 target[k] = v
-    follower_smooth_move_to(robot, obs, target, duration_s=duration_s, fps=fps)
+    if duration_fn is not None:
+        duration_s = duration_fn(obs, target)
+    return follower_smooth_move_to(robot, obs, target, duration_s=duration_s,
+                                   fps=fps, abort_check=abort_check)
