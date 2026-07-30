@@ -168,7 +168,13 @@ class InteractiveStrategy(BaseStrategy):
         """Per-run cap in seconds; staged mode returns the active stage's."""
         return cfg.duration
 
-    def _run_inference(self, ctx: RolloutContext) -> None:
+    def _window_complete(self) -> bool:
+        """Hook polled every control tick: True ends the window with reason
+        'stage complete'. Staged auto-advance implements it off the
+        progress-head readout; here windows only end by key/duration."""
+        return False
+
+    def _run_inference(self, ctx: RolloutContext) -> str:
         engine = self._engine
         cfg = ctx.runtime.cfg
         robot = ctx.hardware.robot_wrapper
@@ -204,6 +210,9 @@ class InteractiveStrategy(BaseStrategy):
             if duration > 0 and (time.perf_counter() - start) >= duration:
                 why = f"duration cap {duration:.0f}s"
                 break
+            if self._window_complete():
+                why = "stage complete"
+                break
 
             obs = robot.get_observation()
             obs_processed = self._process_observation_and_notify(ctx.processors, obs)
@@ -224,6 +233,7 @@ class InteractiveStrategy(BaseStrategy):
         if log is not None:
             self._flush_log(log, why)
         logger.info("inference STOPPED (%s) — number keys to reposition, g to rerun", why)
+        return why
 
     def _log_step(self, log, t, obs, action_dict, dt):
         if log["state_keys"] is None:

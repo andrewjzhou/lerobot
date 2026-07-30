@@ -52,13 +52,19 @@ logger = logging.getLogger(__name__)
 MODEL_KEYS = ("q", "w", "e", "r", "t")
 
 
+# progress must sit above the stage threshold this long (continuously)
+# before the stage counts as complete — one replan-noise spike can't advance
+COMPLETE_SUSTAIN_S = 1.0
+
+
 @dataclass
 class _Stage:
     key: str
     name: str
     task: str
-    duration: float
+    duration: float                    # per-stage timeout: cap = assumed done
     engine: InferenceEngine
+    complete_threshold: float | None = None   # progress >= thr -> complete
 
 
 class StagedStrategy(InteractiveStrategy):
@@ -93,8 +99,18 @@ class StagedStrategy(InteractiveStrategy):
                 task=st.get("task", cfg.task),
                 duration=float(st.get("duration", cfg.duration)),
                 engine=engine,
+                complete_threshold=(None if st.get("complete_threshold") is None
+                                    else float(st["complete_threshold"])),
             ))
         self._active = 0
+        self._complete_since: float | None = None
+        if self.config.auto_advance:
+            missing = [s_.name for s_, st in zip(self._stages, stages, strict=True)
+                       if st.get("complete_threshold") is None]
+            if missing:
+                logger.warning("auto_advance: stages %s have no "
+                               "complete_threshold — they advance on timeout only",
+                               missing)
         keymap = " | ".join(f"{s.key}={s.name}" for s in self._stages)
         logger.info("Staged strategy ready — models: %s | 1..0=poses | "
                     "g=run active model | s=stop | o=open gripper %.0f%% | "
@@ -114,6 +130,49 @@ class StagedStrategy(InteractiveStrategy):
 
     def _inference_duration(self, cfg) -> float:
         return self._stages[self._active].duration
+
+    def _window_complete(self) -> bool:
+        """Auto-advance completion: the active stage's progress readout has
+        sat at/above its threshold for COMPLETE_SUSTAIN_S."""
+        import time
+
+        if not self.config.auto_advance:
+            return False
+        stage = self._stages[self._active]
+        if stage.complete_threshold is None:
+            return False
+        p = getattr(stage.engine, "last_progress", None)
+        if p is None or p < stage.complete_threshold:
+            self._complete_since = None
+            return False
+        if self._complete_since is None:
+            self._complete_since = time.perf_counter()
+            return False
+        return time.perf_counter() - self._complete_since >= COMPLETE_SUSTAIN_S
+
+    def _run_chain(self, ctx: RolloutContext) -> None:
+        """Auto-advance: run from the selected stage to the last one. A
+        stage ends on its sustained progress threshold or its duration cap
+        (timeout = assumed complete); either advances. 's' stops the whole
+        chain, ESC quits the session."""
+        import time
+
+        while not ctx.runtime.shutdown_event.is_set():
+            stage = self._stages[self._active]
+            self._complete_since = None
+            why = self._run_inference(ctx)
+            progress = getattr(stage.engine, "last_progress", None)
+            logger.info("<<< %s [%s] ended (%s)%s", stage.name, stage.key, why,
+                        f" — progress {progress:+.3f}" if progress is not None else "")
+            if why in ("stop key", "quit key", "shutdown"):
+                break
+            if self._active + 1 >= len(self._stages):
+                logger.info("=== chain complete (all %d stages) ===",
+                            len(self._stages))
+                break
+            time.sleep(self.config.advance_settle_s)
+            self._select(self._active + 1)
+            logger.info("auto-advancing...")
 
     def run(self, ctx: RolloutContext) -> None:
         import time
@@ -138,11 +197,14 @@ class StagedStrategy(InteractiveStrategy):
             elif k is not None and k in MODEL_KEYS and MODEL_KEYS.index(k) < len(self._stages):
                 self._select(MODEL_KEYS.index(k))
             elif k == "g":
-                self._run_inference(ctx)
-                s = self._stages[self._active]
-                progress = getattr(s.engine, "last_progress", None)
-                logger.info("<<< %s [%s] window ended%s", s.name, s.key,
-                            f" — progress {progress:+.3f}" if progress is not None else "")
+                if self.config.auto_advance:
+                    self._run_chain(ctx)
+                else:
+                    self._run_inference(ctx)
+                    s = self._stages[self._active]
+                    progress = getattr(s.engine, "last_progress", None)
+                    logger.info("<<< %s [%s] window ended%s", s.name, s.key,
+                                f" — progress {progress:+.3f}" if progress is not None else "")
             elif k == "o":
                 self._open_gripper(robot)
             else:

@@ -94,6 +94,12 @@ class StagedStrategyConfig(InteractiveStrategyConfig):
     the normal context build path loads it; the strategy builds the rest."""
 
     stages: list[dict] = field(default_factory=list)
+    # When true, 'g' runs a CHAIN from the selected stage: a stage ends on
+    # its progress threshold (sustained) or its duration cap (= per-stage
+    # timeout, assumed complete), then the next stage starts after a short
+    # settle. 's' still stops the whole chain; ESC quits.
+    auto_advance: bool = False
+    advance_settle_s: float = 0.5
 
 
 @RolloutStrategyConfig.register_subclass("sentry")

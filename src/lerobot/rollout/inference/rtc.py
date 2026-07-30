@@ -248,6 +248,7 @@ class RTCInferenceEngine(InferenceEngine):
         self._action_adapter = adapter
 
     def reset(self) -> None:
+        self.last_progress = None  # stale readouts must not trigger auto-advance
         """Reset the policy, processors, and action queue."""
         logger.info("Resetting RTC inference state (policy + processors + queue)")
         self._policy.reset()
