@@ -86,9 +86,10 @@ class InteractiveStrategy(BaseStrategy):
             self._session_dir.mkdir(parents=True, exist_ok=True)
             logger.info("debug logs -> %s", self._session_dir)
         keymap = " | ".join(f"{i + 1}={n}" for i, n in enumerate(self._pose_names))
+        quit_label = "q/ESC" if "q" in self.QUIT_KEYS else "ESC"
         logger.info("Interactive strategy ready — %s | g=start inference | "
-                    "s=stop | o=open gripper %.0f%% | q/ESC=quit",
-                    keymap, cfg.open_gripper_fraction * 100)
+                    "s=stop | o=open gripper %.0f%% | %s=quit",
+                    keymap, cfg.open_gripper_fraction * 100, quit_label)
 
     def run(self, ctx: RolloutContext) -> None:
         robot = ctx.hardware.robot_wrapper

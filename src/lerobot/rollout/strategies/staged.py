@@ -49,7 +49,7 @@ from .interactive import InteractiveStrategy
 
 logger = logging.getLogger(__name__)
 
-MODEL_KEYS = "qwert"
+MODEL_KEYS = ("q", "w", "e", "r", "t")
 
 
 @dataclass
@@ -135,7 +135,7 @@ class StagedStrategy(InteractiveStrategy):
                 self._last_pose = name
                 logger.info("at pose '%s'", name)
                 self._announce()
-            elif k in MODEL_KEYS and MODEL_KEYS.index(k) < len(self._stages):
+            elif k is not None and k in MODEL_KEYS and MODEL_KEYS.index(k) < len(self._stages):
                 self._select(MODEL_KEYS.index(k))
             elif k == "g":
                 self._run_inference(ctx)
