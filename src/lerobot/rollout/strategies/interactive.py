@@ -42,11 +42,15 @@ from .core import send_next_action
 
 logger = logging.getLogger(__name__)
 
-MAX_POSES = 5
+MAX_POSES = 10  # keys 1..9 and 0 (=10th)
 
 
 class InteractiveStrategy(BaseStrategy):
     """Keyed pose moves + operator-gated inference (no recording)."""
+
+    # Keys that end the session; ESC arrives as the "\x1b" sentinel.
+    # StagedStrategy narrows this to ESC-only so 'q' can select a model.
+    QUIT_KEYS = ("q", "\x1b")
 
     def setup(self, ctx: RolloutContext) -> None:
         super().setup(ctx)
@@ -68,7 +72,7 @@ class InteractiveStrategy(BaseStrategy):
         def on_press(key):
             ch = getattr(key, "char", None)
             if key == keyboard.Key.esc:
-                ch = "q"
+                ch = "\x1b"
             if ch:
                 self._keys.append(ch.lower())
 
@@ -90,11 +94,11 @@ class InteractiveStrategy(BaseStrategy):
         robot = ctx.hardware.robot_wrapper
         while not ctx.runtime.shutdown_event.is_set():
             k = self._keys.popleft() if self._keys else None
-            if k == "q":
+            if k in self.QUIT_KEYS:
                 logger.info("quit requested")
                 break
-            elif k and k.isdigit() and 1 <= int(k) <= len(self._pose_names):
-                name = self._pose_names[int(k) - 1]
+            elif k and k.isdigit() and 1 <= (10 if k == "0" else int(k)) <= len(self._pose_names):
+                name = self._pose_names[(10 if k == "0" else int(k)) - 1]
                 logger.info("moving to pose '%s'...", name)
                 move_robot_to_named_pose(robot, self._poses, name,
                                          duration_s=self.config.move_duration_s,
@@ -140,6 +144,10 @@ class InteractiveStrategy(BaseStrategy):
         follower_smooth_move_to(robot, obs, target, duration_s=1.0, fps=30)
         logger.info("gripper opened — number keys to repose, g to rerun")
 
+    def _inference_duration(self, cfg) -> float:
+        """Per-run cap in seconds; staged mode returns the active stage's."""
+        return cfg.duration
+
     def _run_inference(self, ctx: RolloutContext) -> None:
         engine = self._engine
         cfg = ctx.runtime.cfg
@@ -157,8 +165,9 @@ class InteractiveStrategy(BaseStrategy):
             log = {"t": [], "state": [], "action": [], "dt": [],
                    "frames": [], "state_keys": None, "action_keys": None,
                    "dir": self._session_dir / f"run{self._run_idx:02d}"}
+        duration = self._inference_duration(cfg)
         logger.info("inference STARTED — 's' to stop%s",
-                    f" (auto-stop after {cfg.duration:.0f}s)" if cfg.duration > 0 else "")
+                    f" (auto-stop after {duration:.0f}s)" if duration > 0 else "")
         start = time.perf_counter()
         why = "shutdown"
         while not ctx.runtime.shutdown_event.is_set():
@@ -168,12 +177,12 @@ class InteractiveStrategy(BaseStrategy):
                 if k == "s":
                     why = "stop key"
                     break
-                if k == "q":
+                if k in self.QUIT_KEYS:
                     why = "quit key"
                     ctx.runtime.shutdown_event.set()
                     break
-            if cfg.duration > 0 and (time.perf_counter() - start) >= cfg.duration:
-                why = f"duration cap {cfg.duration:.0f}s"
+            if duration > 0 and (time.perf_counter() - start) >= duration:
+                why = f"duration cap {duration:.0f}s"
                 break
 
             obs = robot.get_observation()

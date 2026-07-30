@@ -80,6 +80,22 @@ class InteractiveStrategyConfig(RolloutStrategyConfig):
     log_frame_stride: int = 3
 
 
+@RolloutStrategyConfig.register_subclass("staged")
+@dataclass
+class StagedStrategyConfig(InteractiveStrategyConfig):
+    """Interactive operation over MULTIPLE policies: letter keys q/w/e/r/t
+    select the active model (up to 5, in list order), 'g' runs it with its
+    own task string and duration cap, number keys 1..0 move to named poses,
+    's' stops, 'o' opens the gripper while idle, ESC quits ('q' is a model
+    key here). Stage entries are fully-resolved dicts — repo-side config
+    preparation expands per-stage card references into
+    {key, name, policy: {...}, inference: {...}, task, duration}. The first
+    stage doubles as the RolloutConfig's top-level policy/inference/task so
+    the normal context build path loads it; the strategy builds the rest."""
+
+    stages: list[dict] = field(default_factory=list)
+
+
 @RolloutStrategyConfig.register_subclass("sentry")
 @dataclass
 class SentryStrategyConfig(RolloutStrategyConfig):
