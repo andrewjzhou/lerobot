@@ -78,6 +78,25 @@ class InteractiveStrategy(BaseStrategy):
 
         self._listener = keyboard.Listener(on_press=on_press)
         self._listener.start()
+
+        # pynput taps key events at the window system, but every keystroke
+        # ALSO lands in the terminal's stdin buffer, which nothing reads:
+        # keys echo into the log lines during the session and the shell
+        # receives the whole backlog when the program exits. Take the tty
+        # out of echo/canonical mode for the session; teardown flushes the
+        # buffer and restores the original attributes.
+        self._tty_attrs = None
+        try:
+            import sys as _sys
+            import termios as _termios
+            if _sys.stdin.isatty():
+                fd = _sys.stdin.fileno()
+                self._tty_attrs = _termios.tcgetattr(fd)
+                quiet = _termios.tcgetattr(fd)
+                quiet[3] &= ~(_termios.ECHO | _termios.ICANON)
+                _termios.tcsetattr(fd, _termios.TCSADRAIN, quiet)
+        except Exception:
+            self._tty_attrs = None
         self._run_idx = 0
         self._last_pose = "startup"
         self._session_dir = None
@@ -244,6 +263,15 @@ class InteractiveStrategy(BaseStrategy):
     def teardown(self, ctx: RolloutContext) -> None:
         try:
             self._listener.stop()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_tty_attrs", None) is not None:
+                import sys as _sys
+                import termios as _termios
+                fd = _sys.stdin.fileno()
+                _termios.tcflush(fd, _termios.TCIFLUSH)   # drop typed backlog
+                _termios.tcsetattr(fd, _termios.TCSADRAIN, self._tty_attrs)
         except Exception:
             pass
         super().teardown(ctx)
