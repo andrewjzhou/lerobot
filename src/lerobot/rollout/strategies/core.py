@@ -280,6 +280,7 @@ def send_next_action(
     obs_raw: dict,
     ctx: RolloutContext,
     interpolator: ActionInterpolator,
+    engine: InferenceEngine | None = None,
 ) -> dict | None:
     """Dispatch the next action to the robot.
 
@@ -288,10 +289,15 @@ def send_next_action(
     ``robot_action_processor`` to the robot.  Works identically for
     sync and async backends — the rollout strategy never needs to branch.
 
+    ``engine`` defaults to the context's primary engine; strategies that
+    manage several engines (staged) MUST pass their active one, otherwise
+    observations feed the active engine while actions drain the primary —
+    the robot then replays the primary's stale queue.
+
     Returns the action dict that was sent, or ``None`` if no action was
     ready (e.g. empty async queue, interpolator not yet primed).
     """
-    engine = ctx.policy.inference
+    engine = engine if engine is not None else ctx.policy.inference
     features = ctx.data.dataset_features
     ordered_keys = ctx.data.ordered_action_keys
 
