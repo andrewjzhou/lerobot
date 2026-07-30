@@ -52,9 +52,12 @@ logger = logging.getLogger(__name__)
 MODEL_KEYS = ("q", "w", "e", "r", "t")
 
 
-# progress must sit above the stage threshold this long (continuously)
-# before the stage counts as complete — one replan-noise spike can't advance
-COMPLETE_SUSTAIN_S = 1.0
+# Default: progress must sit above the stage threshold this long
+# (continuously) before the stage counts as complete, so one replan-noise
+# spike can't advance. Stages whose progress OSCILLATES semantically
+# (scrape regresses at every retry stroke and may never hold above the
+# threshold) should set complete_sustain_s: 0 — first crossing advances.
+DEFAULT_COMPLETE_SUSTAIN_S = 1.0
 
 
 @dataclass
@@ -65,6 +68,7 @@ class _Stage:
     duration: float                    # per-stage timeout: cap = assumed done
     engine: InferenceEngine
     complete_threshold: float | None = None   # progress >= thr -> complete
+    complete_sustain_s: float = DEFAULT_COMPLETE_SUSTAIN_S
 
 
 class StagedStrategy(InteractiveStrategy):
@@ -101,6 +105,8 @@ class StagedStrategy(InteractiveStrategy):
                 engine=engine,
                 complete_threshold=(None if st.get("complete_threshold") is None
                                     else float(st["complete_threshold"])),
+                complete_sustain_s=float(st.get("complete_sustain_s",
+                                                DEFAULT_COMPLETE_SUSTAIN_S)),
             ))
         self._active = 0
         self._complete_since: float | None = None
@@ -145,10 +151,18 @@ class StagedStrategy(InteractiveStrategy):
         if p is None or p < stage.complete_threshold:
             self._complete_since = None
             return False
+        if stage.complete_sustain_s <= 0:
+            logger.info("stage complete: progress %+.3f >= %+.3f", p,
+                        stage.complete_threshold)
+            return True
         if self._complete_since is None:
             self._complete_since = time.perf_counter()
             return False
-        return time.perf_counter() - self._complete_since >= COMPLETE_SUSTAIN_S
+        if time.perf_counter() - self._complete_since >= stage.complete_sustain_s:
+            logger.info("stage complete: progress %+.3f >= %+.3f held %.1fs", p,
+                        stage.complete_threshold, stage.complete_sustain_s)
+            return True
+        return False
 
     def _run_chain(self, ctx: RolloutContext) -> None:
         """Auto-advance: run from the selected stage to the last one. A
