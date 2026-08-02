@@ -60,6 +60,11 @@ class ActionQueue:
         """
         self.queue = None  # Processed actions for robot rollout
         self.original_queue = None  # Original actions for RTC
+        # Pre-adapter processed actions (absolute, policy feature space).
+        # Only populated when an action adapter converts chunks to robot
+        # space: the adapter output in `queue` can't be re-anchored for the
+        # RTC prev-chunk prefix, this stream can.
+        self.policy_queue = None
         self.lock = Lock()
         self.last_index = 0
         self.cfg = cfg
@@ -88,6 +93,7 @@ class ActionQueue:
         with self.lock:
             self.queue = None
             self.original_queue = None
+            self.policy_queue = None
             self.last_index = 0
             self.seed_action = None
 
@@ -154,12 +160,27 @@ class ActionQueue:
                 return None
             return self.queue[self.last_index :].clone()
 
+    def get_policy_left_over(self) -> Tensor | None:
+        """Get leftover pre-adapter processed actions (absolute, policy
+        feature space) — the reanchorable equivalent of
+        ``get_processed_left_over`` when an action adapter is in use.
+
+        Returns:
+            Tensor | None: Remaining pre-adapter actions
+                (remaining_steps, action_dim), or None if not tracked.
+        """
+        with self.lock:
+            if self.policy_queue is None:
+                return None
+            return self.policy_queue[self.last_index :].clone()
+
     def merge(
         self,
         original_actions: Tensor,
         processed_actions: Tensor,
         real_delay: int,
         action_index_before_inference: int | None = None,
+        policy_actions: Tensor | None = None,
     ):
         """Merge new actions into the queue.
 
@@ -172,18 +193,30 @@ class ActionQueue:
             processed_actions: Post-processed actions for robot (time_steps, action_dim).
             real_delay: Number of time steps of inference delay.
             action_index_before_inference: Index before inference started, for validation.
+            policy_actions: Pre-adapter processed actions (absolute, policy
+                feature space); pass when an action adapter converted
+                ``processed_actions`` to robot space, so RTC reanchoring has
+                a policy-space tail to work from.
         """
         with self.lock:
             if self.cfg.enabled:
                 delay = self._check_and_resolve_delays(real_delay, action_index_before_inference)
-                self._replace_actions_queue(original_actions, processed_actions, delay)
+                self._replace_actions_queue(
+                    original_actions, processed_actions, delay, policy_actions
+                )
                 return
 
             # Append mode: chunks queue back-to-back; the delay bookkeeping
             # (and its mismatch warning) only applies to replace mode.
-            self._append_actions_queue(original_actions, processed_actions)
+            self._append_actions_queue(original_actions, processed_actions, policy_actions)
 
-    def _replace_actions_queue(self, original_actions: Tensor, processed_actions: Tensor, real_delay: int):
+    def _replace_actions_queue(
+        self,
+        original_actions: Tensor,
+        processed_actions: Tensor,
+        real_delay: int,
+        policy_actions: Tensor | None = None,
+    ):
         """Replace the queue with new actions (RTC mode).
 
         Discards the first `real_delay` actions since they correspond to the time
@@ -197,6 +230,11 @@ class ActionQueue:
         clamped_delay = max(0, min(real_delay, len(original_actions), len(processed_actions)))
         new_original = original_actions[clamped_delay:].clone()
         new_processed = processed_actions[clamped_delay:].clone()
+        # Keep the policy-space stream index-aligned with the served queue;
+        # it stays UNBLENDED — it feeds reanchoring, which needs the policy's
+        # actual plan, not the served cross-fade.
+        self.policy_queue = (policy_actions[clamped_delay:].clone()
+                             if policy_actions is not None else None)
 
         blend = self.cfg.splice_blend_steps
         if blend > 0 and self.queue is None and self.seed_action is not None:
@@ -235,7 +273,12 @@ class ActionQueue:
 
         self.last_index = 0
 
-    def _append_actions_queue(self, original_actions: Tensor, processed_actions: Tensor):
+    def _append_actions_queue(
+        self,
+        original_actions: Tensor,
+        processed_actions: Tensor,
+        policy_actions: Tensor | None = None,
+    ):
         """Append new actions to the queue (non-RTC mode).
 
         Removes already-consumed actions and appends new ones, maintaining
@@ -244,10 +287,13 @@ class ActionQueue:
         Args:
             original_actions: Unprocessed actions from policy.
             processed_actions: Post-processed actions for robot.
+            policy_actions: Pre-adapter processed actions (see ``merge``).
         """
         if self.queue is None:
             self.original_queue = original_actions.clone()
             self.queue = processed_actions.clone()
+            self.policy_queue = (policy_actions.clone()
+                                 if policy_actions is not None else None)
             return
 
         self.original_queue = torch.cat([self.original_queue, original_actions.clone()])
@@ -255,6 +301,14 @@ class ActionQueue:
 
         self.queue = torch.cat([self.queue, processed_actions.clone()])
         self.queue = self.queue[self.last_index :]
+
+        if self.policy_queue is not None and policy_actions is not None:
+            self.policy_queue = torch.cat([self.policy_queue, policy_actions.clone()])
+            self.policy_queue = self.policy_queue[self.last_index :]
+        else:
+            # An adapter either feeds this stream every merge or never;
+            # a mixed sequence can't stay index-aligned, so drop it.
+            self.policy_queue = None
 
         self.last_index = 0
 

@@ -362,13 +362,16 @@ class RTCInferenceEngine(InferenceEngine):
                             obs_batch["task"] = [self._task]
                             preprocessed = self._preprocessor(obs_batch)
 
-                        if (prev_actions is not None and self._relative_step is not None
-                                and self._action_adapter is None):
+                        if prev_actions is not None and self._relative_step is not None:
                             # Rebase against the raw cached state so the leftover tail stays in
-                            # the training-time coordinate frame.
+                            # the training-time coordinate frame. With an action adapter the
+                            # served queue is robot-space, so the reanchorable absolutes come
+                            # from the queue's pre-adapter policy stream instead.
                             raw_state = self._relative_step.get_cached_state()
                             if raw_state is not None:
-                                prev_abs = queue.get_processed_left_over()
+                                prev_abs = (queue.get_policy_left_over()
+                                            if self._action_adapter is not None
+                                            else queue.get_processed_left_over())
                                 if prev_abs is not None and prev_abs.numel() > 0:
                                     prev_actions = reanchor_relative_rtc_prefix(
                                         prev_actions_absolute=prev_abs,
@@ -401,7 +404,13 @@ class RTCInferenceEngine(InferenceEngine):
 
                         original = actions.squeeze(0).clone()
                         processed = self._postprocessor(actions).squeeze(0)
+                        policy_abs = None
                         if self._action_adapter is not None:
+                            # keep the absolute policy-space chunk: the queue
+                            # stores it index-aligned so the next replan can
+                            # reanchor the leftover tail (adapter output is
+                            # robot-space and can't be rebased)
+                            policy_abs = processed.clone()
                             processed = self._action_adapter.adapt_chunk(processed)
                         new_latency = time.perf_counter() - current_time
                         new_delay = math.ceil(new_latency / time_per_chunk)
@@ -414,7 +423,8 @@ class RTCInferenceEngine(InferenceEngine):
                         else:
                             latency_tracker.add(new_latency)
 
-                        queue.merge(original, processed, new_delay, idx_before)
+                        queue.merge(original, processed, new_delay, idx_before,
+                                    policy_actions=policy_abs)
 
                         if (
                             is_warmup
