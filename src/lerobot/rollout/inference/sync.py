@@ -93,6 +93,12 @@ class SyncInferenceEngine(InferenceEngine):
         """No background resources to stop."""
         logger.info("SyncInferenceEngine stopped")
 
+    def set_task(self, task: str) -> None:
+        """Swap the language prompt used for subsequent inferences."""
+        if task != self._task:
+            logger.info("task -> %r", task)
+            self._task = task
+
     def reset(self) -> None:
         """Reset the policy and pre/post-processors."""
         logger.info("Resetting sync inference state (policy + processors)")

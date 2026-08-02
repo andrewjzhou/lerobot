@@ -122,6 +122,8 @@ class RTCInferenceEngine(InferenceEngine):
 
         self._action_queue: ActionQueue | None = None
         self._obs_holder: dict[str, Any] = {}
+        # NOTE: self._task is re-read at every replan, so set_task takes
+        # effect on the next inference without an engine rebuild.
         # Latest progress-head readout in raw units ([-1, 0], 0 = subtask
         # complete); None when the policy has no progress head. Updated once
         # per replan; consumed by stage-transition logic.
@@ -246,6 +248,13 @@ class RTCInferenceEngine(InferenceEngine):
         policy space; adapter-based policies must ignore prev_chunk_left_over).
         """
         self._action_adapter = adapter
+
+    def set_task(self, task: str) -> None:
+        """Swap the language prompt; consumed at the next replan (staged
+        prompt-only stages share one engine and switch the task string)."""
+        if task != self._task:
+            logger.info("task -> %r", task)
+            self._task = task
 
     def reset(self) -> None:
         self.last_progress = None  # stale readouts must not trigger auto-advance

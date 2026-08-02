@@ -19,6 +19,10 @@ inference config, task string and duration cap), 'g' runs it; everything
 else behaves like the interactive strategy (number keys 1..0 = poses,
 's' = stop, 'o' = open gripper while idle). ESC quits — 'q' is a model key.
 
+A stage WITHOUT a `policy` block is prompt-only: it shares the primary
+engine and just switches the task string on select (single-model VLA
+deployments, e.g. pi0.5 with per-stage subtask commands).
+
 All stage policies are loaded onto the GPU at setup, so switching is
 instant. Stage 1 arrives pre-built through the normal rollout context
 (repo-side config preparation copies it to the top-level policy/inference/
@@ -91,6 +95,13 @@ class StagedStrategy(InteractiveStrategy):
             if i == 0:
                 # pre-built by the normal context path (top-level policy)
                 engine = ctx.policy.inference
+            elif "policy" not in st:
+                # prompt-only stage: same model, different task string
+                # (e.g. pi0.5 — one engine, per-stage language commands)
+                logger.info("stage %d/%d: %s shares the primary engine "
+                            "(prompt-only)", i + 1, len(stages),
+                            st.get("name", st.get("key", "?")))
+                engine = ctx.policy.inference
             else:
                 logger.info("loading stage %d/%d: %s ...", i + 1, len(stages),
                             st.get("name", st.get("key", "?")))
@@ -130,7 +141,12 @@ class StagedStrategy(InteractiveStrategy):
 
     def _select(self, idx: int) -> None:
         self._active = idx
-        self._engine = self._stages[idx].engine
+        stage = self._stages[idx]
+        self._engine = stage.engine
+        # shared-engine stages differ only by prompt; harmless no-op when
+        # the engine already carries this stage's task
+        if hasattr(stage.engine, "set_task"):
+            stage.engine.set_task(stage.task)
         self._cached_obs_processed = None
         self._announce()
 
