@@ -240,7 +240,16 @@ class DiffusionModel(nn.Module):
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
 
-        self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
+        if config.denoiser == "dit":
+            self.unet = DiffusionTransformerDenoiser(
+                config, global_cond_dim=global_cond_dim * config.n_obs_steps
+            )
+        elif config.denoiser == "unet":
+            self.unet = DiffusionConditionalUnet1d(
+                config, global_cond_dim=global_cond_dim * config.n_obs_steps
+            )
+        else:
+            raise ValueError(f"Unknown denoiser {config.denoiser!r} (expected 'unet' or 'dit')")
 
         # Lightweight head predicting the smoothed current (normalized) from
         # the global conditioning — auxiliary regularization only, unused at
@@ -703,6 +712,102 @@ class DiffusionConv1dBlock(nn.Module):
 
     def forward(self, x):
         return self.block(x)
+
+
+class _DiTBlock(nn.Module):
+    """Transformer block with adaLN-zero conditioning (Peebles & Xie,
+    arXiv 2212.09748): LayerNorms carry no affine params; shift/scale/gate
+    come from the conditioning vector, gates zero-initialized so every
+    block starts as identity."""
+
+    def __init__(self, dim: int, heads: int, ffn_mult: int, dropout: float):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False)
+        self.attn = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim, elementwise_affine=False)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, ffn_mult * dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_mult * dim, dim),
+        )
+        self.mod = nn.Linear(dim, 6 * dim)
+        nn.init.zeros_(self.mod.weight)
+        nn.init.zeros_(self.mod.bias)
+
+    def forward(self, h: Tensor, cond: Tensor) -> Tensor:
+        shift1, scale1, gate1, shift2, scale2, gate2 = self.mod(F.silu(cond)).chunk(6, dim=-1)
+        x = self.norm1(h) * (1 + scale1[:, None]) + shift1[:, None]
+        h = h + gate1[:, None] * self.attn(x, x, x, need_weights=False)[0]
+        x = self.norm2(h) * (1 + scale2[:, None]) + shift2[:, None]
+        return h + gate2[:, None] * self.mlp(x)
+
+
+class DiffusionTransformerDenoiser(nn.Module):
+    """DiT-style denoiser: drop-in replacement for DiffusionConditionalUnet1d
+    (same (x, timestep, global_cond) -> (B, T, action_dim) interface).
+
+    The action sequence is tokenized per timestep (Linear in-proj + learned
+    positional embedding); conditioning = diffusion-step sinusoidal embedding
+    + projected global_cond, injected into every block via adaLN-zero. The
+    output projection is zero-initialized (standard DiT), so the initial
+    epsilon prediction is 0.
+    """
+
+    def __init__(self, config: DiffusionConfig, global_cond_dim: int):
+        super().__init__()
+        dim = config.dit_dim
+        action_dim = config.action_feature.shape[0]
+        self.in_proj = nn.Linear(action_dim, dim)
+        self.pos_emb = nn.Parameter(torch.zeros(1, config.horizon, dim))
+        self.time_mlp = nn.Sequential(
+            DiffusionSinusoidalPosEmb(config.diffusion_step_embed_dim),
+            nn.Linear(config.diffusion_step_embed_dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+        )
+        self.cond_proj = nn.Sequential(
+            nn.Linear(global_cond_dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+        )
+        self.blocks = nn.ModuleList(
+            _DiTBlock(dim, config.dit_heads, config.dit_ffn_mult, config.dit_dropout)
+            for _ in range(config.dit_depth)
+        )
+        self.final_norm = nn.LayerNorm(dim, elementwise_affine=False)
+        self.final_mod = nn.Linear(dim, 2 * dim)
+        self.out_proj = nn.Linear(dim, action_dim)
+        nn.init.normal_(self.pos_emb, std=0.02)
+        nn.init.zeros_(self.final_mod.weight)
+        nn.init.zeros_(self.final_mod.bias)
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(self, x: Tensor, timestep: Tensor | int, global_cond=None) -> Tensor:
+        """
+        Args:
+            x: (B, T, action_dim) noisy action sequence.
+            timestep: (B,) tensor or scalar diffusion step.
+            global_cond: (B, global_cond_dim)
+        Returns:
+            (B, T, action_dim) prediction (epsilon or sample per config).
+        """
+        if not torch.is_tensor(timestep):
+            timestep = torch.tensor([timestep], device=x.device)
+        elif timestep.ndim == 0:
+            timestep = timestep[None].to(x.device)
+        t_emb = self.time_mlp(timestep.to(dtype=x.dtype))
+        if t_emb.shape[0] == 1 and x.shape[0] > 1:
+            t_emb = t_emb.expand(x.shape[0], -1)
+        cond = t_emb + self.cond_proj(global_cond)
+
+        h = self.in_proj(x) + self.pos_emb[:, : x.shape[1]]
+        for block in self.blocks:
+            h = block(h, cond)
+        shift, scale = self.final_mod(F.silu(cond)).chunk(2, dim=-1)
+        h = self.final_norm(h) * (1 + scale[:, None]) + shift[:, None]
+        return self.out_proj(h)
 
 
 class DiffusionConditionalUnet1d(nn.Module):

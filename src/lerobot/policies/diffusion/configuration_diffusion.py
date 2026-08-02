@@ -172,12 +172,23 @@ class DiffusionConfig(PreTrainedConfig):
     use_group_norm: bool = False
     spatial_softmax_num_keypoints: int = 32
     use_separate_rgb_encoder_per_camera: bool = True
+    # Denoiser selection: "unet" (default, DiffusionConditionalUnet1d) or
+    # "dit" (DiffusionTransformerDenoiser — adaLN-zero transformer, same
+    # (x, timestep, global_cond) interface).
+    denoiser: str = "unet"
     # Unet.
     down_dims: tuple[int, ...] = (512, 1024, 2048)
     kernel_size: int = 5
     n_groups: int = 8
     diffusion_step_embed_dim: int = 128
     use_film_scale_modulation: bool = True
+    # DiT (only used when denoiser == "dit"). Defaults sized to roughly
+    # match the (512, 1024, 2048) UNet's denoiser parameter count.
+    dit_dim: int = 1024
+    dit_depth: int = 14
+    dit_heads: int = 16
+    dit_ffn_mult: int = 4
+    dit_dropout: float = 0.0
     # Noise scheduler.
     noise_scheduler_type: str = "DDPM"
     num_train_timesteps: int = 100
