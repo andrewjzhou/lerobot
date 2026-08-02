@@ -79,6 +79,7 @@ class SyncInferenceEngine(InferenceEngine):
         # observation space; adapt_action maps the policy's action back into
         # robot-space (e.g. end-effector pose -> joint targets via IK).
         self._action_adapter = action_adapter
+        self._obs_constants: dict = {}
         logger.info(
             "SyncInferenceEngine initialized (device=%s, action_keys=%d)",
             self._device,
@@ -99,6 +100,11 @@ class SyncInferenceEngine(InferenceEngine):
             logger.info("task -> %r", task)
             self._task = task
 
+    def set_obs_constants(self, constants: dict | None) -> None:
+        """Constant observation features injected into every frame (e.g. a
+        per-stage task one-hot). Keys must be declared policy input features."""
+        self._obs_constants = dict(constants or {})
+
     def reset(self) -> None:
         """Reset the policy and pre/post-processors."""
         logger.info("Resetting sync inference state (policy + processors)")
@@ -118,6 +124,8 @@ class SyncInferenceEngine(InferenceEngine):
         observation = copy(obs_frame)
         if self._action_adapter is not None:
             observation = self._action_adapter.adapt_observation(observation)
+        if self._obs_constants:
+            observation.update(self._obs_constants)
         autocast_ctx = (
             torch.autocast(device_type=self._device.type)
             if self._device.type == "cuda" and self._policy.config.use_amp

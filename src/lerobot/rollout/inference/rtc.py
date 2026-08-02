@@ -123,7 +123,9 @@ class RTCInferenceEngine(InferenceEngine):
         self._action_queue: ActionQueue | None = None
         self._obs_holder: dict[str, Any] = {}
         # NOTE: self._task is re-read at every replan, so set_task takes
-        # effect on the next inference without an engine rebuild.
+        # effect on the next inference without an engine rebuild. Same for
+        # self._obs_constants (set_obs_constants).
+        self._obs_constants: dict[str, Any] = {}
         # Latest progress-head readout in raw units ([-1, 0], 0 = subtask
         # complete); None when the policy has no progress head. Updated once
         # per replan; consumed by stage-transition logic.
@@ -256,6 +258,18 @@ class RTCInferenceEngine(InferenceEngine):
             logger.info("task -> %r", task)
             self._task = task
 
+    def set_obs_constants(self, constants: dict | None) -> None:
+        """Constant observation features injected into every frame at replan
+        time — e.g. a per-stage task one-hot ({'observation.task_onehot':
+        np.array([1,0,0], dtype=np.float32)}) for task-conditioned policies.
+        The key must be a declared policy input feature so the normalizer
+        has stats for it. Consumed at the next replan; pass None/{} to clear."""
+        self._obs_constants = dict(constants or {})
+        if self._obs_constants:
+            logger.info("obs constants -> %s",
+                        {k: getattr(v, "tolist", lambda: v)()
+                         for k, v in self._obs_constants.items()})
+
     def reset(self) -> None:
         self.last_progress = None  # stale readouts must not trigger auto-advance
         """Reset the policy, processors, and action queue."""
@@ -341,6 +355,8 @@ class RTCInferenceEngine(InferenceEngine):
                                 fb = build_dataset_frame(self._hw_features, o, prefix="observation")
                                 if self._action_adapter is not None:
                                     fb = self._action_adapter.adapt_observation(fb)
+                                if self._obs_constants:
+                                    fb.update(self._obs_constants)
                                 fb = prepare_observation_for_inference(
                                     fb, policy_device, self._task, self._robot.robot_type
                                 )
@@ -356,6 +372,8 @@ class RTCInferenceEngine(InferenceEngine):
                             obs_batch = build_dataset_frame(self._hw_features, obs, prefix="observation")
                             if self._action_adapter is not None:
                                 obs_batch = self._action_adapter.adapt_observation(obs_batch)
+                            if self._obs_constants:
+                                obs_batch.update(self._obs_constants)
                             obs_batch = prepare_observation_for_inference(
                                 obs_batch, policy_device, self._task, self._robot.robot_type
                             )

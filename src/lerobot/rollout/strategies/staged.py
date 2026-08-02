@@ -73,6 +73,9 @@ class _Stage:
     engine: InferenceEngine
     complete_threshold: float | None = None   # progress >= thr -> complete
     complete_sustain_s: float = DEFAULT_COMPLETE_SUSTAIN_S
+    # constant observation features for this stage (e.g. task one-hot for
+    # a unified task-conditioned policy); {} = none
+    obs_constants: dict | None = None
 
 
 class StagedStrategy(InteractiveStrategy):
@@ -108,6 +111,12 @@ class StagedStrategy(InteractiveStrategy):
                 engine = _build_stage_engine(ctx, st)
                 engine.reset()
                 engine.start()
+            obs_constants = None
+            if st.get("obs_constants"):
+                import numpy as np
+
+                obs_constants = {k: np.asarray(v, dtype=np.float32)
+                                 for k, v in st["obs_constants"].items()}
             self._stages.append(_Stage(
                 key=st.get("key", MODEL_KEYS[i]),
                 name=st.get("name", MODEL_KEYS[i]),
@@ -118,6 +127,7 @@ class StagedStrategy(InteractiveStrategy):
                                     else float(st["complete_threshold"])),
                 complete_sustain_s=float(st.get("complete_sustain_s",
                                                 DEFAULT_COMPLETE_SUSTAIN_S)),
+                obs_constants=obs_constants,
             ))
         self._active = 0
         self._complete_since: float | None = None
@@ -132,7 +142,9 @@ class StagedStrategy(InteractiveStrategy):
         logger.info("Staged strategy ready — models: %s | 1..0=poses | "
                     "g=run active model | s=stop | o=open gripper %.0f%% | "
                     "ESC=quit", keymap, cfg.strategy.open_gripper_fraction * 100)
-        self._announce()
+        # _select (not just _announce): stage 1's task/obs-constants must be
+        # pushed onto the primary engine before the first run
+        self._select(0)
 
     def _announce(self) -> None:
         s = self._stages[self._active]
@@ -143,10 +155,12 @@ class StagedStrategy(InteractiveStrategy):
         self._active = idx
         stage = self._stages[idx]
         self._engine = stage.engine
-        # shared-engine stages differ only by prompt; harmless no-op when
-        # the engine already carries this stage's task
+        # shared-engine stages differ only by prompt / injected constants;
+        # harmless no-ops when the engine already carries this stage's values
         if hasattr(stage.engine, "set_task"):
             stage.engine.set_task(stage.task)
+        if hasattr(stage.engine, "set_obs_constants"):
+            stage.engine.set_obs_constants(stage.obs_constants)
         self._cached_obs_processed = None
         self._announce()
 
