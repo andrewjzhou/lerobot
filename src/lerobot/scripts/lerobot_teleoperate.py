@@ -99,6 +99,7 @@ from lerobot.teleoperators import (  # noqa: F401
     make_teleoperator_from_config,
     omx_leader,
     openarm_leader,
+    openarm_ker,
     openarm_mini,
     reachy2_teleoperator,
     rebot_102_leader,
