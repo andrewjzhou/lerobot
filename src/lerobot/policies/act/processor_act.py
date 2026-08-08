@@ -18,11 +18,13 @@ from typing import Any
 import torch
 
 from lerobot.processor import (
+    AbsoluteActionsProcessorStep,
     AddBatchDimensionProcessorStep,
     DeviceProcessorStep,
     NormalizerProcessorStep,
     PolicyAction,
     PolicyProcessorPipeline,
+    RelativeActionsProcessorStep,
     RenameObservationsProcessorStep,
     UnnormalizerProcessorStep,
     policy_action_to_transition,
@@ -55,6 +57,16 @@ def make_act_pre_post_processors(
         pre-processor pipeline and the post-processor pipeline.
     """
 
+    # Relative actions (same contract as the diffusion policy): AFTER the
+    # normalizer on the way in, BEFORE the unnormalizer on the way out, so
+    # offsets live in normalized units and the round trip is exact. The pair
+    # is always present (disabled by default) so saved processor JSONs stay
+    # structurally identical across configs.
+    relative_step = RelativeActionsProcessorStep(
+        enabled=config.use_relative_actions,
+        exclude_joints=list(config.relative_exclude_joints),
+        action_names=config.action_feature_names,
+    )
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
@@ -65,8 +77,12 @@ def make_act_pre_post_processors(
             stats=dataset_stats,
             device=config.device,
         ),
+        relative_step,
     ]
     output_steps = [
+        AbsoluteActionsProcessorStep(
+            enabled=config.use_relative_actions, relative_step=relative_step
+        ),
         UnnormalizerProcessorStep(
             features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats
         ),

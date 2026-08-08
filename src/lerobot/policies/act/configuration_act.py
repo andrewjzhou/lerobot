@@ -118,6 +118,17 @@ class ACTConfig(PreTrainedConfig):
     # Note: the value used in ACT when temporal ensembling is enabled is 0.01.
     temporal_ensemble_coeff: float | None = None
 
+    # --- Relative EE actions (same mechanism as the diffusion policy; the
+    # processor pair converts action <-> action - state AFTER normalization
+    # on the way in / BEFORE unnormalization on the way out). Deployment:
+    # RTC engine only — the sync engine rejects relative policies, so
+    # temporal ensembling cannot be combined with relative actions. ---
+    use_relative_actions: bool = False
+    # Names to keep absolute (token match against action_feature_names).
+    relative_exclude_joints: list[str] = field(default_factory=list)
+    # Per-dim action names (from the dataset card) used to build the mask.
+    action_feature_names: list[str] | None = None
+
     # Training and loss computation.
     dropout: float = 0.1
     kl_weight: float = 10.0
