@@ -140,6 +140,28 @@ class OpenArmFollower(Robot):
         logger.info(f"Connecting arm on {self.config.port}...")
         self.bus.connect()
 
+        # Optional gravity feedforward model (see config.gravity_ff_xml)
+        self._grav = None
+        if self.config.gravity_ff_xml:
+            import mujoco
+
+            assert self.config.side in ("left", "right"), "gravity_ff needs config.side"
+            gm = mujoco.MjModel.from_xml_path(self.config.gravity_ff_xml)
+            gd = mujoco.MjData(gm)
+            jids = [mujoco.mj_name2id(gm, mujoco.mjtObj.mjOBJ_JOINT,
+                                      f"openarm_{self.config.side}_joint{i}")
+                    for i in range(1, 8)]
+            assert all(j >= 0 for j in jids), "gravity_ff_xml missing arm joints"
+            self._grav = {
+                "mujoco": mujoco, "m": gm, "d": gd,
+                "qadr": [gm.jnt_qposadr[j] for j in jids],
+                "dofadr": [gm.jnt_dofadr[j] for j in jids],
+                # conservative per-class feedforward caps (Nm)
+                "cap": {"dm8009": 20.0, "dm4340": 8.0, "dm4310": 3.0},
+            }
+            logger.info("Gravity feedforward ENABLED (%s, scale %.2f)",
+                        self.config.gravity_ff_xml, self.config.gravity_ff_scale)
+
         # Run calibration if needed
         if not self.is_calibrated and calibrate:
             logger.info(
@@ -349,6 +371,27 @@ class OpenArmFollower(Robot):
                     else self.config.position_kd
                 )
             commands[motor_name] = (kp, kd, position_degrees, 0.0, 0.0)
+
+        if getattr(self, "_grav", None) is not None:
+            g = self._grav
+            import numpy as _np
+
+            for i in range(1, 8):
+                name = f"joint_{i}"
+                if name in goal_pos:
+                    g["d"].qpos[g["qadr"][i - 1]] = _np.radians(goal_pos[name])
+            g["d"].qvel[:] = 0.0
+            g["mujoco"].mj_forward(g["m"], g["d"])
+            for i in range(1, 8):
+                name = f"joint_{i}"
+                if name not in commands:
+                    continue
+                cap = g["cap"].get(self.config.motor_config[name][2], 3.0)
+                tau = float(_np.clip(
+                    self.config.gravity_ff_scale * g["d"].qfrc_bias[g["dofadr"][i - 1]],
+                    -cap, cap))
+                kp, kd, pos, vel, _ = commands[name]
+                commands[name] = (kp, kd, pos, vel, tau)
 
         self.bus._mit_control_batch(commands)
 

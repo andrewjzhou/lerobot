@@ -105,6 +105,16 @@ class OpenArmFollowerConfigBase:
     )
     position_kd: list[float] = field(default_factory=lambda: [5.0, 5.0, 3.0, 5.0, 0.3, 0.3, 0.3, 0.3])
 
+    # Gravity feedforward: when set to a MuJoCo XML containing joints
+    # "openarm_{side}_joint1..7", send_action adds tau_ff = qfrc_bias(q_goal)
+    # (clamped per motor class) to every MIT position packet, so the PD only
+    # corrects errors instead of also holding the arm's weight against
+    # gravity. Requires config.side. Joint-zero calibration offsets are
+    # deliberately ignored (~1-2 deg zero error changes gravity torque
+    # negligibly).
+    gravity_ff_xml: str | None = None
+    gravity_ff_scale: float = 1.0
+
     # Values for joint limits. Can be overridden via CLI (for custom values) or by setting config.side to either 'left' or 'right'.
     # If config.side is left set to None and no CLI values are passed, the default joint limit values are small for safety.
     joint_limits: dict[str, tuple[float, float]] = field(
