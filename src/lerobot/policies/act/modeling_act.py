@@ -123,8 +123,13 @@ class ACTPolicy(PreTrainedPolicy):
         return self._action_queue.popleft()
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
-        """Predict a chunk of actions given environment observations."""
+    def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs) -> Tensor:
+        """Predict a chunk of actions given environment observations.
+
+        Extra kwargs (inference_delay, prev_chunk_left_over, ...) are RTC
+        prefix-inpainting hints the rollout engine passes to every policy;
+        ACT has no inpainting path and ignores them.
+        """
         self.eval()
 
         if self.config.image_features:
