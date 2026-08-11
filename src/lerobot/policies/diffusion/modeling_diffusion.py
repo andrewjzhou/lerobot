@@ -198,8 +198,50 @@ class DiffusionPolicy(PreTrainedPolicy):
                 if self.config.n_obs_steps == 1 and batch[key].ndim == 4:
                     batch[key] = batch[key].unsqueeze(1)
             batch[OBS_IMAGES] = self._stack_views(batch)
+            if self.training and (self.config.aug_glare_p > 0 or self.config.aug_noise_p > 0):
+                batch[OBS_IMAGES] = _train_augment(batch[OBS_IMAGES].clone(), self.config)
         loss, output_dict = self.diffusion.compute_loss(batch)
         return loss, output_dict
+
+
+def _train_augment(imgs: Tensor, cfg) -> Tensor:
+    """Train-only photometric augmentation on stacked views
+    (B, S, N, C, H, W), NORMALIZED image units. Glare: 1..max_blobs soft
+    anisotropic gaussians (shared across the S obs steps — real glare is
+    static within 66 ms), optionally restricted to cfg.aug_glare_rect and to
+    one camera. Noise: additive gaussian on all views."""
+    b, s_, n, c, h, w = imgs.shape
+    dev = imgs.device
+    if cfg.aug_glare_p > 0:
+        yy, xx = torch.meshgrid(
+            torch.linspace(0, 1, h, device=dev),
+            torch.linspace(0, 1, w, device=dev), indexing="ij")
+        rect = None
+        if cfg.aug_glare_rect:
+            x0, y0, x1, y1 = cfg.aug_glare_rect
+            rect = ((xx >= x0) & (xx <= x1) & (yy >= y0) & (yy <= y1)).float()
+        cams = range(n) if cfg.aug_glare_cam_index < 0 else [cfg.aug_glare_cam_index]
+        for cam in cams:
+            sel = torch.rand(b, device=dev) < cfg.aug_glare_p
+            for bi in sel.nonzero(as_tuple=True)[0]:
+                glow = torch.zeros(h, w, device=dev)
+                for _ in range(int(torch.randint(1, cfg.aug_glare_max_blobs + 1, (1,)).item())):
+                    cx = float(torch.empty(1).uniform_(0.12, 0.88))
+                    cy = float(torch.empty(1).uniform_(0.12, 0.88))
+                    sx = float(torch.empty(1).uniform_(0.04, 0.22))
+                    sy = sx * float(torch.empty(1).uniform_(0.3, 1.0))
+                    amp = float(torch.empty(1).uniform_(0.2, cfg.aug_glare_amp))
+                    g = amp * torch.exp(-0.5 * (((xx - cx) / sx) ** 2 + ((yy - cy) / sy) ** 2))
+                    glow = torch.maximum(glow, g)
+                if rect is not None:
+                    glow = glow * rect
+                imgs[bi, :, cam] = imgs[bi, :, cam] + glow
+    if cfg.aug_noise_p > 0:
+        sel = torch.rand(b, device=dev) < cfg.aug_noise_p
+        idx = sel.nonzero(as_tuple=True)[0]
+        if len(idx):
+            imgs[idx] = imgs[idx] + torch.randn_like(imgs[idx]) * cfg.aug_noise_std
+    return imgs
 
 
 def _make_noise_scheduler(name: str, **kwargs: dict):
@@ -271,6 +313,15 @@ class DiffusionModel(nn.Module):
                 nn.Linear(global_cond_dim * config.n_obs_steps, 128),
                 nn.ReLU(),
                 nn.Linear(128, config.n_obs_steps),
+            )
+
+        # Pixel head: amodal 2D point (e.g. tracker pixel in the head cam),
+        # one (u, v) per obs step, predicted from the global conditioning.
+        if config.pixel_aux_weight > 0:
+            self.pixel_head = nn.Sequential(
+                nn.Linear(global_cond_dim * config.n_obs_steps, 128),
+                nn.ReLU(),
+                nn.Linear(128, 2 * config.n_obs_steps),
             )
 
         if config.compile_model:
@@ -483,6 +534,16 @@ class DiffusionModel(nn.Module):
             aux = F.mse_loss(self.progress_head(global_cond), target)
             aux_terms["progress_aux_loss"] = aux.item()
             loss = loss + self.config.progress_aux_weight * aux
+        if self.config.pixel_aux_weight > 0:
+            target = batch[self.config.pixel_aux_key].flatten(start_dim=1)
+            pred = self.pixel_head(global_cond)
+            per = F.smooth_l1_loss(pred, target, reduction="none")
+            per = per.view(per.shape[0], -1, 2)
+            valid = (batch[self.config.pixel_aux_valid_key].flatten(start_dim=1)
+                     > 0).float().unsqueeze(-1)
+            aux = (per * valid).sum() / (valid.sum() * 2).clamp(min=1.0)
+            aux_terms["pixel_aux_loss"] = aux.item()
+            loss = loss + self.config.pixel_aux_weight * aux
         if aux_terms:
             return loss, {"denoise_loss": denoise_loss.item(), **aux_terms}
 

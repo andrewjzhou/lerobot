@@ -161,6 +161,29 @@ class DiffusionConfig(PreTrainedConfig):
     progress_aux_weight: float = 0.0
     progress_aux_key: str = "observation.progress"
 
+    # --- Pixel head (2D end-effector localization in a camera view) ---
+    # weight > 0 adds a small MLP head on the global conditioning predicting
+    # `pixel_aux_key` (e.g. the vive tracker's normalized (u,v) in the head
+    # camera; one 2-vector per obs step). AMODAL: trained on every frame,
+    # including when the point is occluded/masked/out of frame; frames whose
+    # `pixel_aux_valid_key` is <= 0 (post-normalization) are dropped from the
+    # loss (far-out-of-frame). Same contract as progress_aux: both keys must
+    # be declared input features but are NEVER fed to the conditioning.
+    pixel_aux_weight: float = 0.0
+    pixel_aux_key: str = "observation.puck_uv"
+    pixel_aux_valid_key: str = "observation.puck_valid"
+
+    # --- Train-time image augmentation (applied ONLY under self.training,
+    # in NORMALIZED image units, after view stacking; never at deploy) ---
+    aug_glare_p: float = 0.0          # per-sample probability of glare blobs
+    aug_glare_max_blobs: int = 2
+    aug_glare_amp: float = 0.8        # max blob amplitude (normalized units)
+    aug_glare_cam_index: int = -1     # index into image_features order; -1 = all
+    aug_glare_rect: list[float] | None = None  # [x0,y0,x1,y1] normalized; keeps
+                                               # glare off baked-masked regions
+    aug_noise_p: float = 0.0          # per-sample probability of pixel noise
+    aug_noise_std: float = 0.10       # gaussian std (normalized units)
+
     # Architecture / modeling.
     # Vision backbone.
     vision_backbone: str = "resnet18"
