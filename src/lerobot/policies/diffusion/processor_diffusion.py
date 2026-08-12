@@ -76,12 +76,23 @@ def make_diffusion_pre_post_processors(
         exclude_joints=list(config.relative_exclude_joints),
         action_names=config.action_feature_names,
     )
+    # UMI-style SE(3) relative poses run INSIDE the model on raw values
+    # (rotation algebra is invalid after per-dim affine normalization), so
+    # observation.state and action skip the stats normalizer entirely; the
+    # model applies its own se3_pos_scale instead.
+    norm_features = {**config.input_features, **config.output_features}
+    unnorm_features = dict(config.output_features)
+    if config.use_se3_relative:
+        norm_features = {
+            k: v for k, v in norm_features.items() if k not in ("observation.state", "action")
+        }
+        unnorm_features = {k: v for k, v in unnorm_features.items() if k != "action"}
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(
-            features={**config.input_features, **config.output_features},
+            features=norm_features,
             norm_map=config.normalization_mapping,
             stats=dataset_stats,
         ),
@@ -92,7 +103,7 @@ def make_diffusion_pre_post_processors(
             enabled=config.use_relative_actions, relative_step=relative_step
         ),
         UnnormalizerProcessorStep(
-            features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats
+            features=unnorm_features, norm_map=config.normalization_mapping, stats=dataset_stats
         ),
         DeviceProcessorStep(device="cpu"),
     ]

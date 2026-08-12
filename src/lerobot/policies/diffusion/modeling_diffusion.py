@@ -20,6 +20,7 @@ TODO(alexander-soare):
   - Remove reliance on diffusers for DDPMScheduler and LR scheduler.
 """
 
+import copy
 import math
 from collections import deque
 from collections.abc import Callable
@@ -50,6 +51,7 @@ from ..utils import (
     populate_queues,
 )
 from .configuration_diffusion import DiffusionConfig
+from .se3 import derelativize_window, pose9_to_mat, relativize_window
 
 
 class DiffusionPolicy(PreTrainedPolicy):
@@ -83,10 +85,65 @@ class DiffusionPolicy(PreTrainedPolicy):
 
         self.diffusion = DiffusionModel(config)
 
+        if config.use_ema:
+            # Original diffusion_policy trains an EMA copy and evaluates it.
+            self.ema_diffusion = copy.deepcopy(self.diffusion).requires_grad_(False)
+            self.register_buffer("_ema_steps", torch.zeros((), dtype=torch.long))
+
         self.reset()
 
     def get_optim_params(self) -> dict:
         return self.diffusion.parameters()
+
+    def update(self) -> None:
+        """Called by the train loop after every optimizer step (see
+        lerobot_train's `has_method(policy, "update")` hook). EMA update
+        with the diffusers power schedule used by original diffusion_policy."""
+        if not self.config.use_ema:
+            return
+        self._ema_steps += 1
+        step = int(self._ema_steps)
+        decay = 1.0 - (1.0 + step / self.config.ema_inv_gamma) ** (-self.config.ema_power)
+        decay = min(max(decay, 0.0), self.config.ema_max_decay)
+        with torch.no_grad():
+            for ema_p, p in zip(
+                self.ema_diffusion.parameters(), self.diffusion.parameters(), strict=True
+            ):
+                ema_p.lerp_(p, 1.0 - decay)
+            for ema_b, b in zip(
+                self.ema_diffusion.buffers(), self.diffusion.buffers(), strict=True
+            ):
+                ema_b.copy_(b)
+
+    @property
+    def _inference_model(self) -> "DiffusionModel":
+        """EMA weights at eval time when enabled, live weights otherwise."""
+        if self.config.use_ema and not self.training:
+            return self.ema_diffusion
+        return self.diffusion
+
+    def _se3_relativize_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Re-express state (B, To, 9) — and action (B, H, 9) when present —
+        in the frame of the last observation step, then scale positions.
+        Returns a shallow copy; also stashes the anchor for derelativization."""
+        batch = dict(batch)
+        state = batch[OBS_STATE]
+        anchor = pose9_to_mat(state[:, -1])
+        self._se3_anchor = anchor
+        rel_state = relativize_window(state, anchor)
+        rel_state[..., :3] /= self.config.se3_pos_scale
+        batch[OBS_STATE] = rel_state
+        if ACTION in batch:
+            rel_action = relativize_window(batch[ACTION], anchor)
+            rel_action[..., :3] /= self.config.se3_pos_scale
+            batch[ACTION] = rel_action
+        return batch
+
+    def _se3_derelativize_actions(self, actions: Tensor) -> Tensor:
+        """Model-frame relative actions (B, T, 9) -> absolute world poses."""
+        actions = actions.clone()
+        actions[..., :3] *= self.config.se3_pos_scale
+        return derelativize_window(actions, self._se3_anchor)
 
     def reset(self):
         """Clear observation and action queues. Should be called on `env.reset()`"""
@@ -132,7 +189,11 @@ class DiffusionPolicy(PreTrainedPolicy):
                     1, self.config.horizon, self.config.action_feature.shape[0],
                     dtype=p.dtype, device=p.device)
             noise = self._frozen_noise
-        actions = self.diffusion.generate_actions(batch, noise=noise)
+        if self.config.use_se3_relative:
+            batch = self._se3_relativize_batch(batch)
+        actions = self._inference_model.generate_actions(batch, noise=noise)
+        if self.config.use_se3_relative:
+            actions = self._se3_derelativize_actions(actions)
         return actions
 
     @torch.no_grad()
@@ -208,6 +269,8 @@ class DiffusionPolicy(PreTrainedPolicy):
             batch[OBS_IMAGES] = self._stack_views(batch)
             if self.training and (self.config.aug_glare_p > 0 or self.config.aug_noise_p > 0):
                 batch[OBS_IMAGES] = _train_augment(batch[OBS_IMAGES].clone(), self.config)
+        if self.config.use_se3_relative:
+            batch = self._se3_relativize_batch(batch)
         loss, output_dict = self.diffusion.compute_loss(batch)
         return loss, output_dict
 

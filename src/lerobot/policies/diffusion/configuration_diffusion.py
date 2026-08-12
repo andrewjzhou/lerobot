@@ -137,6 +137,31 @@ class DiffusionConfig(PreTrainedConfig):
     # Per-dim action names (from the dataset card) used to build the mask.
     action_feature_names: list[str] | None = None
 
+    # --- UMI-faithful SE(3) relative poses (arXiv 2402.10329, PD2) ---
+    # Re-express observation.state AND action windows in the frame of the
+    # LAST observation step (the anchor): after the transform the anchor
+    # state is exactly identity ([0,0,0, 1,0,0,0,1,0]), earlier obs steps
+    # carry velocity information, and actions are SE(3) transforms w.r.t.
+    # the anchor (UMI's "relative trajectory"). Makes the policy invariant
+    # to the world/tracking frame — no train/rollout frame calibration.
+    # Requires: observation.state and action are both 9D [xyz + rot6d cols].
+    # The transform runs INSIDE the model on raw (unnormalized) poses — the
+    # processor pipeline skips normalization for these two keys, and
+    # positions are scaled by 1/se3_pos_scale in place of dataset stats
+    # (rot6d components are already in [-1, 1]). Mutually exclusive with
+    # use_relative_actions.
+    use_se3_relative: bool = False
+    # Meters mapped to 1.0 normalized unit for relative positions. Should
+    # comfortably cover the largest within-horizon displacement in the data.
+    se3_pos_scale: float = 0.2
+
+    # --- EMA of model weights (original diffusion_policy trains with EMA
+    # and evaluates the EMA copy; diffusers EMAModel power schedule) ---
+    use_ema: bool = False
+    ema_power: float = 0.75
+    ema_inv_gamma: float = 1.0
+    ema_max_decay: float = 0.9999
+
     # --- Current-as-touch additions (arXiv 2607.03529) ---
     # Extra STATE-type input features concatenated to observation.state in the
     # global conditioning (e.g. ["observation.current"]). They receive the same
@@ -267,6 +292,14 @@ class DiffusionConfig(PreTrainedConfig):
                 f"Got {self.noise_scheduler_type}."
             )
 
+        if self.use_se3_relative and self.use_relative_actions:
+            raise ValueError(
+                "`use_se3_relative` and `use_relative_actions` are mutually "
+                "exclusive — the SE(3) transform subsumes the delta-actions one."
+            )
+        if self.use_se3_relative and self.se3_pos_scale <= 0:
+            raise ValueError(f"`se3_pos_scale` must be > 0. Got {self.se3_pos_scale}.")
+
         if self.resize_shape is not None and (
             len(self.resize_shape) != 2 or any(d <= 0 for d in self.resize_shape)
         ):
@@ -312,6 +345,15 @@ class DiffusionConfig(PreTrainedConfig):
     def validate_features(self) -> None:
         if len(self.image_features) == 0 and self.env_state_feature is None:
             raise ValueError("You must provide at least one image or the environment state among the inputs.")
+
+        if self.use_se3_relative:
+            state_dim = self.robot_state_feature.shape[0] if self.robot_state_feature else None
+            action_dim = self.action_feature.shape[0] if self.action_feature else None
+            if state_dim != 9 or action_dim != 9:
+                raise ValueError(
+                    "`use_se3_relative` requires 9D [xyz + rot6d] observation.state "
+                    f"and action. Got state={state_dim}, action={action_dim}."
+                )
 
         if self.resize_shape is None and self.crop_shape is not None:
             for key, image_ft in self.image_features.items():
