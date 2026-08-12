@@ -251,16 +251,27 @@ class ActionQueue:
             # Cross-fade from the old chunk's remaining (time-aligned) actions
             # into the new chunk so a trajectory-mode switch cannot produce a
             # step discontinuity in the served command stream.
+            #
+            # The fade must NOT shrink with the old-queue remainder: by merge
+            # time the replan has usually consumed the queue to ~0 rows, so a
+            # remainder-limited fade silently collapses to nothing and every
+            # splice becomes a step discontinuity (observed 12-19 deg/tick).
+            # Where the old plan has no row left, anchor on its last row —
+            # falling back to the last SERVED command (queue[last_index - 1])
+            # when the old queue is fully consumed.
             old_processed = self.queue[self.last_index:]
             old_original = (self.original_queue[self.last_index:]
                             if self.original_queue is not None else old_processed)
-            n = min(blend, len(old_processed), len(new_processed))
+            if len(old_processed) == 0 and self.last_index > 0:
+                old_processed = self.queue[self.last_index - 1:self.last_index]
+            n = min(blend, len(new_processed)) if len(old_processed) > 0 else 0
             if n > 0:
                 alphas = torch.linspace(1.0 / (n + 1), n / (n + 1), n,
                                         dtype=new_processed.dtype)
                 for i in range(n):
                     a = alphas[i]
-                    new_processed[i] = (1 - a) * old_processed[i].to(new_processed.dtype) + a * new_processed[i]
+                    src = old_processed[min(i, len(old_processed) - 1)]
+                    new_processed[i] = (1 - a) * src.to(new_processed.dtype) + a * new_processed[i]
                     if i < len(old_original):
                         new_original[i] = (1 - a) * old_original[i].to(new_original.dtype) + a * new_original[i]
 

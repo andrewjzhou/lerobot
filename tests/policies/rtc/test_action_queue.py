@@ -823,3 +823,64 @@ def test_typical_non_rtc_workflow(action_queue_rtc_disabled, sample_actions):
 
     # Should have 10 remaining + 50 new = 60
     assert action_queue_rtc_disabled.qsize() == 60
+
+
+# Splice-blend starvation tests (fade must not shrink with old-queue remainder)
+
+
+def _blend_queue(blend_steps):
+    return ActionQueue(
+        RTCConfig(enabled=True, execution_horizon=10, max_guidance_weight=1.0,
+                  splice_blend_steps=blend_steps)
+    )
+
+
+def test_blend_engages_when_old_queue_fully_consumed():
+    """Replan often consumes the old queue to 0 rows before merge; the fade
+    must then anchor on the last SERVED action instead of collapsing to 0."""
+    queue = _blend_queue(3)
+    old = torch.zeros(5, 6)
+    queue.merge(old, old, real_delay=0)
+    for _ in range(5):  # consume everything
+        queue.get()
+
+    new = torch.ones(10, 6) * 8.0
+    queue.merge(new.clone(), new.clone(), real_delay=0)
+
+    served = torch.stack([queue.get() for _ in range(4)])
+    # alphas = [1/4, 2/4, 3/4] fading 0 -> 8, then raw rows
+    expected = torch.tensor([2.0, 4.0, 6.0, 8.0])
+    assert torch.allclose(served[:, 0], expected)
+    # monotone ramp, no step discontinuity vs last served (0)
+    steps = torch.diff(torch.cat([torch.zeros(1), served[:, 0]]))
+    assert steps.max() <= 2.0 + 1e-6
+
+
+def test_blend_pads_with_final_old_row_when_remainder_short():
+    """With 1 old row left, the fade keeps its full length by holding that
+    row as the anchor for the remaining fade steps."""
+    queue = _blend_queue(3)
+    old = torch.zeros(5, 6)
+    queue.merge(old, old, real_delay=0)
+    for _ in range(4):  # 1 row remains
+        queue.get()
+
+    new = torch.ones(10, 6) * 8.0
+    queue.merge(new.clone(), new.clone(), real_delay=0)
+
+    served = torch.stack([queue.get() for _ in range(4)])
+    expected = torch.tensor([2.0, 4.0, 6.0, 8.0])
+    assert torch.allclose(served[:, 0], expected)
+
+
+def test_blend_skipped_when_nothing_ever_served():
+    """No served action and no old rows -> no anchor -> chunk passes through
+    unchanged (first-chunk case is handled by the seed path instead)."""
+    queue = _blend_queue(3)
+    old = torch.zeros(5, 6)
+    queue.merge(old, old, real_delay=5)  # delay swallows the whole chunk
+    assert queue.qsize() == 0
+
+    new = torch.ones(10, 6) * 8.0
+    queue.merge(new.clone(), new.clone(), real_delay=0)
+    assert torch.allclose(queue.get(), torch.ones(6) * 8.0)
