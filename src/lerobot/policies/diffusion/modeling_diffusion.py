@@ -127,7 +127,6 @@ class DiffusionPolicy(PreTrainedPolicy):
                 batch[OBS_IMAGES] = self._stack_views(batch)
         if self.config.frozen_inference_noise and noise is None:
             if getattr(self, "_frozen_noise", None) is None:
-                from lerobot.utils.utils import get_safe_torch_device  # noqa: F401
                 p = next(self.parameters())
                 self._frozen_noise = torch.randn(
                     1, self.config.horizon, self.config.action_feature.shape[0],
