@@ -94,6 +94,7 @@ class DiffusionPolicy(PreTrainedPolicy):
             OBS_STATE: deque(maxlen=self.config.n_obs_steps),
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
+        self._frozen_noise = None          # re-sampled lazily per rollout
         if self.config.image_features:
             self._queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
@@ -124,6 +125,14 @@ class DiffusionPolicy(PreTrainedPolicy):
                     if batch[key].ndim == 4:
                         batch[key] = batch[key].unsqueeze(1)
                 batch[OBS_IMAGES] = self._stack_views(batch)
+        if self.config.frozen_inference_noise and noise is None:
+            if getattr(self, "_frozen_noise", None) is None:
+                from lerobot.utils.utils import get_safe_torch_device  # noqa: F401
+                p = next(self.parameters())
+                self._frozen_noise = torch.randn(
+                    1, self.config.horizon, self.config.action_feature.shape[0],
+                    dtype=p.dtype, device=p.device)
+            noise = self._frozen_noise
         actions = self.diffusion.generate_actions(batch, noise=noise)
         return actions
 

@@ -184,6 +184,12 @@ class DiffusionConfig(PreTrainedConfig):
     aug_noise_p: float = 0.0          # per-sample probability of pixel noise
     aug_noise_std: float = 0.10       # gaussian std (normalized units)
 
+    # Inference: reuse ONE sampling latent for the whole rollout (set on
+    # reset(), reused every predict_action_chunk). Consecutive replans become
+    # correlated draws instead of independent samples -> far less chunk-to-
+    # chunk disagreement at RTC splices. No effect on training.
+    frozen_inference_noise: bool = False
+
     # Architecture / modeling.
     # Vision backbone.
     vision_backbone: str = "resnet18"
