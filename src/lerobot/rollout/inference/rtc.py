@@ -292,6 +292,9 @@ class RTCInferenceEngine(InferenceEngine):
         )
         self._rtc_thread.start()
         logger.info("RTC inference thread started")
+        if self._rtc_config.execution_latency_ticks:
+            logger.info("actuation-latency matching: +%d ticks",
+                        self._rtc_config.execution_latency_ticks)
 
     def stop(self) -> None:
         """Signal the RTC thread to stop and wait for it."""
@@ -532,8 +535,10 @@ class RTCInferenceEngine(InferenceEngine):
                         else:
                             latency_tracker.add(new_latency)
 
-                        queue.merge(original, processed, new_delay, idx_before,
-                                    policy_actions=policy_abs)
+                        queue.merge(
+                            original, processed,
+                            new_delay + self._rtc_config.execution_latency_ticks,
+                            idx_before, policy_actions=policy_abs)
 
                         # throttled background viz (no control-loop impact)
                         uv_n = getattr(

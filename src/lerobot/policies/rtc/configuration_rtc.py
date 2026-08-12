@@ -37,6 +37,14 @@ class RTCConfig:
     # Infrastructure
     enabled: bool = True
 
+    # Actuation-latency matching: skip this many EXTRA rows at every chunk
+    # merge so the action issued at wall time t targets the pose intended
+    # for t + N ticks — the plant (PD lag, measured ~86 ms on the OpenArm)
+    # then lands ON the demo trajectory instead of trailing it. Demos have
+    # zero tracking lag (the human hand is the plant), so this is the one
+    # train/deploy timing term not matched by construction. 0 = off.
+    execution_latency_ticks: int = 0
+
     # Core RTC settings
     # Todo change to exp
     prefix_attention_schedule: RTCAttentionSchedule = RTCAttentionSchedule.LINEAR
