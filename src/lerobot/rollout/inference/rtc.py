@@ -417,8 +417,13 @@ class RTCInferenceEngine(InferenceEngine):
                             "_last_progress_norm", None)
                         if p_norm is not None:
                             self.last_progress = (p_norm - 1.0) / 2.0
-                            logger.info("progress %.3f (0 = subtask complete)",
-                                        self.last_progress)
+                            # console readout throttled to ~1/s (replans can
+                            # be every ~0.5 s; don't spam the terminal)
+                            now_p = time.perf_counter()
+                            if now_p - getattr(self, "_progress_printed_t", 0.0) >= 1.0:
+                                self._progress_printed_t = now_p
+                                print(f"[progress] {self.last_progress:+.3f}  "
+                                      "(-1 = start, 0 = task complete)", flush=True)
 
                         original = actions.squeeze(0).clone()
                         processed = self._postprocessor(actions).squeeze(0)
