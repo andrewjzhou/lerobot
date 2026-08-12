@@ -452,6 +452,10 @@ class DiffusionModel(nn.Module):
         if hasattr(self, "progress_head"):
             self._last_progress_norm = float(
                 self.progress_head(global_cond)[0, -1].detach())
+        if hasattr(self, "pixel_head"):
+            # last obs step's (u, v), normalized space — for rollout viz
+            self._last_pixel_norm = (
+                self.pixel_head(global_cond).view(-1, 2)[-1].detach().cpu().tolist())
 
         # run sampling
         actions = self.conditional_sample(batch_size, global_cond=global_cond, noise=noise)

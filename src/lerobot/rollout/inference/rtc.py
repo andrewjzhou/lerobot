@@ -48,6 +48,79 @@ from .base import InferenceEngine
 
 logger = logging.getLogger(__name__)
 
+
+class _RolloutViz:
+    """Throttled background saver of the policy's-eye head view + pixel-head
+    marker. Runs entirely off the control loop: images are copied in the RTC
+    thread (~1 ms, once per VIZ_PERIOD_S) and encoded on a daemon thread.
+    Enabled via env ROLLOUT_VIZ=1; never blocks (queue drops when full)."""
+
+    VIZ_PERIOD_S = 2.0
+    MAX_FILES = 60
+
+    def __init__(self):
+        import os
+        import queue as _q
+        self.enabled = os.environ.get("ROLLOUT_VIZ", "1") == "1"
+        self.q = _q.Queue(maxsize=4)
+        self.last_t = 0.0
+        self.n = 0
+        self.dir = None
+        self.thread = None
+
+    def maybe_submit(self, head_img, uv_norm, uv_stats, progress):
+        if not self.enabled or head_img is None or self.n >= self.MAX_FILES:
+            return
+        now = time.perf_counter()
+        if now - self.last_t < self.VIZ_PERIOD_S:
+            return
+        self.last_t = now
+        try:
+            import numpy as _np
+            img = head_img.detach().cpu().numpy() if hasattr(head_img, "detach") else _np.array(head_img)
+            self.q.put_nowait((img.copy(), uv_norm, uv_stats, progress, self.n))
+            self.n += 1
+        except Exception:  # noqa: BLE001 — viz must never break inference
+            pass
+        if self.thread is None:
+            import threading
+            from pathlib import Path
+            self.dir = Path("outputs/rollout_logs") / time.strftime("pixelviz-%Y%m%d-%H%M%S")
+            self.dir.mkdir(parents=True, exist_ok=True)
+            self.thread = threading.Thread(target=self._worker, daemon=True)
+            self.thread.start()
+            logger.info("rollout viz -> %s", self.dir)
+
+    def _worker(self):
+        import cv2
+        import numpy as np
+        while True:
+            img, uv, stats, prog, idx = self.q.get()
+            try:
+                if img.ndim == 3 and img.shape[0] in (1, 3):        # CHW -> HWC
+                    img = np.transpose(img, (1, 2, 0))
+                if img.dtype != np.uint8:
+                    img = (np.clip(img, 0, 1) * 255).astype(np.uint8)
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                h, w = img.shape[:2]
+                if uv is not None:
+                    u, v = uv
+                    if stats is not None:
+                        lo, hi = stats
+                        u = ((u + 1) / 2) * (hi[0] - lo[0]) + lo[0]
+                        v = ((v + 1) / 2) * (hi[1] - lo[1]) + lo[1]
+                    px, py = int(u * w), int(v * h)
+                    cv2.drawMarker(img, (px, py), (255, 0, 255), cv2.MARKER_CROSS, 30, 2)
+                    cv2.circle(img, (px, py), 12, (255, 0, 255), 2)
+                    cv2.putText(img, f"puck ({u:.3f},{v:.3f})", (10, h - 12),
+                                0, 0.55, (255, 0, 255), 2)
+                if prog is not None:
+                    cv2.putText(img, f"progress {prog:+.3f}", (10, 24),
+                                0, 0.7, (0, 255, 255), 2)
+                cv2.imwrite(str(self.dir / f"viz_{idx:03d}.jpg"), img)
+            except Exception:  # noqa: BLE001
+                pass
+
 # How long the RTC loop sleeps when paused, idle, or backpressured by a full queue.
 _RTC_IDLE_SLEEP_S: float = 0.01
 # Backoff between transient inference errors (per consecutive failure).
@@ -119,6 +192,8 @@ class RTCInferenceEngine(InferenceEngine):
         self._use_torch_compile = use_torch_compile
         self._compile_warmup_inferences = compile_warmup_inferences
         self._rtc_queue_threshold = rtc_queue_threshold
+        self._viz = _RolloutViz()
+        self._uv_stats = None            # filled after _normalizer_step below
 
         self._action_queue: ActionQueue | None = None
         self._obs_holder: dict[str, Any] = {}
@@ -163,6 +238,15 @@ class RTCInferenceEngine(InferenceEngine):
             (s for s in preprocessor.steps if isinstance(s, NormalizerProcessorStep)),
             None,
         )
+        try:
+            st = getattr(self._normalizer_step, "stats", None) or {}
+            uv = st.get("observation.puck_uv")
+            if uv is not None:
+                import numpy as _np
+                self._uv_stats = (_np.asarray(uv["min"], dtype=float),
+                                  _np.asarray(uv["max"], dtype=float))
+        except Exception:  # noqa: BLE001
+            self._uv_stats = None
         if self._relative_step is not None:
             if self._relative_step.action_names is None:
                 cfg_names = getattr(policy.config, "action_feature_names", None)
@@ -351,10 +435,12 @@ class RTCInferenceEngine(InferenceEngine):
                             while len(window) < self._n_obs_steps:
                                 window.insert(0, window[0])
                             frames = []
+                            viz_head = None
                             for o in window:
                                 fb = build_dataset_frame(self._hw_features, o, prefix="observation")
                                 if self._action_adapter is not None:
                                     fb = self._action_adapter.adapt_observation(fb)
+                                viz_head = fb.get("observation.images.head", viz_head)
                                 if self._obs_constants:
                                     fb.update(self._obs_constants)
                                 fb = prepare_observation_for_inference(
@@ -448,6 +534,13 @@ class RTCInferenceEngine(InferenceEngine):
 
                         queue.merge(original, processed, new_delay, idx_before,
                                     policy_actions=policy_abs)
+
+                        # throttled background viz (no control-loop impact)
+                        uv_n = getattr(
+                            getattr(self._policy, "diffusion", self._policy),
+                            "_last_pixel_norm", None)
+                        self._viz.maybe_submit(viz_head if self._n_obs_steps > 1 else None,
+                                               uv_n, self._uv_stats, self.last_progress)
 
                         if (
                             is_warmup
