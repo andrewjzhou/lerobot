@@ -406,7 +406,12 @@ class DiffusionModel(nn.Module):
             beta_start=config.beta_start,
             beta_end=config.beta_end,
             beta_schedule=config.beta_schedule,
-            clip_sample=config.clip_sample,
+            # x0-clipping assumes data normalized to [-1, 1]; the SE(3)
+            # relative space is NOT (positions can exceed 1 unit; identity
+            # rot6d sits exactly on the boundary) — clipping there biases
+            # sampling toward zero motion (diagnosed 2026-08-12: 32 mm ->
+            # 1.1 mm offline error with the clip removed).
+            clip_sample=config.clip_sample and not config.use_se3_relative,
             clip_sample_range=config.clip_sample_range,
             prediction_type=config.prediction_type,
         )
