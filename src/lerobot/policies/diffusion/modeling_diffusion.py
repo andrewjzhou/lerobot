@@ -122,27 +122,58 @@ class DiffusionPolicy(PreTrainedPolicy):
             return self.ema_diffusion
         return self.diffusion
 
+    def _se3_stats(self, key: str, like: Tensor) -> tuple[Tensor, Tensor]:
+        """(min, max) tensors for 'state'/'action' in relativized raw units."""
+        cache = getattr(self, "_se3_stats_cache", None)
+        if cache is None:
+            cache = self._se3_stats_cache = {}
+        got = cache.get(key)
+        if got is None or got[0].device != like.device or got[0].dtype != like.dtype:
+            st = self.config.se3_rel_stats
+            lo = torch.as_tensor(st[f"{key}_min"], dtype=like.dtype, device=like.device)
+            hi = torch.as_tensor(st[f"{key}_max"], dtype=like.dtype, device=like.device)
+            got = cache[key] = (lo, hi)
+        return got
+
+    def _se3_normalize(self, x: Tensor, key: str) -> Tensor:
+        lo, hi = self._se3_stats(key, x)
+        return 2.0 * (x - lo) / (hi - lo).clamp(min=1e-6) - 1.0
+
+    def _se3_unnormalize(self, x: Tensor, key: str) -> Tensor:
+        lo, hi = self._se3_stats(key, x)
+        return (x + 1.0) / 2.0 * (hi - lo).clamp(min=1e-6) + lo
+
     def _se3_relativize_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         """Re-express state (B, To, 9) — and action (B, H, 9) when present —
-        in the frame of the last observation step, then scale positions.
-        Returns a shallow copy; also stashes the anchor for derelativization."""
+        in the frame of the last observation step, then map to network units
+        (per-dim MIN_MAX to [-1, 1] when use_se3_normalize, else the fixed
+        position scale). Returns a shallow copy; stashes the anchor."""
         batch = dict(batch)
         state = batch[OBS_STATE]
         anchor = pose9_to_mat(state[:, -1])
         self._se3_anchor = anchor
         rel_state = relativize_window(state, anchor)
-        rel_state[..., :3] /= self.config.se3_pos_scale
+        if self.config.use_se3_normalize:
+            rel_state = self._se3_normalize(rel_state, "state")
+        else:
+            rel_state[..., :3] /= self.config.se3_pos_scale
         batch[OBS_STATE] = rel_state
         if ACTION in batch:
             rel_action = relativize_window(batch[ACTION], anchor)
-            rel_action[..., :3] /= self.config.se3_pos_scale
+            if self.config.use_se3_normalize:
+                rel_action = self._se3_normalize(rel_action, "action")
+            else:
+                rel_action[..., :3] /= self.config.se3_pos_scale
             batch[ACTION] = rel_action
         return batch
 
     def _se3_derelativize_actions(self, actions: Tensor) -> Tensor:
-        """Model-frame relative actions (B, T, 9) -> absolute world poses."""
-        actions = actions.clone()
-        actions[..., :3] *= self.config.se3_pos_scale
+        """Network-unit relative actions (B, T, 9) -> absolute world poses."""
+        if self.config.use_se3_normalize:
+            actions = self._se3_unnormalize(actions, "action")
+        else:
+            actions = actions.clone()
+            actions[..., :3] *= self.config.se3_pos_scale
         return derelativize_window(actions, self._se3_anchor)
 
     def reset(self):
@@ -406,12 +437,15 @@ class DiffusionModel(nn.Module):
             beta_start=config.beta_start,
             beta_end=config.beta_end,
             beta_schedule=config.beta_schedule,
-            # x0-clipping assumes data normalized to [-1, 1]; the SE(3)
-            # relative space is NOT (positions can exceed 1 unit; identity
-            # rot6d sits exactly on the boundary) — clipping there biases
-            # sampling toward zero motion (diagnosed 2026-08-12: 32 mm ->
-            # 1.1 mm offline error with the clip removed).
-            clip_sample=config.clip_sample and not config.use_se3_relative,
+            # x0-clipping assumes data normalized to [-1, 1]. The fixed-scale
+            # SE(3) relative space is NOT (positions can exceed 1 unit;
+            # identity rot6d sits exactly on the boundary) — clipping there
+            # biases sampling toward zero motion (diagnosed 2026-08-12:
+            # 32 mm -> 1.1 mm offline error with the clip removed). With
+            # use_se3_normalize the relativized space IS MIN_MAX-bounded
+            # (original-repo style), so the clip is valid again.
+            clip_sample=config.clip_sample
+            and (not config.use_se3_relative or config.use_se3_normalize),
             clip_sample_range=config.clip_sample_range,
             prediction_type=config.prediction_type,
         )

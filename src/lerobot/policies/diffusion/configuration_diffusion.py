@@ -153,7 +153,17 @@ class DiffusionConfig(PreTrainedConfig):
     use_se3_relative: bool = False
     # Meters mapped to 1.0 normalized unit for relative positions. Should
     # comfortably cover the largest within-horizon displacement in the data.
+    # Ignored when `use_se3_normalize` is on.
     se3_pos_scale: float = 0.2
+    # Original-repo-faithful alternative to se3_pos_scale: per-dim MIN_MAX
+    # normalization of the RELATIVIZED state/action to [-1, 1], with stats
+    # fitted on the relativized dataset (compute_se3_rel_stats.py). Bounds
+    # the diffusion space exactly like original diffusion_policy/UMI, so
+    # x0 clipping (`clip_sample`) is valid again in SE(3) mode.
+    use_se3_normalize: bool = False
+    # {"state_min": [9], "state_max": [9], "action_min": [9],
+    #  "action_max": [9]} — raw relativized units (meters / rot6d).
+    se3_rel_stats: dict | None = None
 
     # --- EMA of model weights (original diffusion_policy trains with EMA
     # and evaluates the EMA copy; diffusers EMAModel power schedule) ---
@@ -299,6 +309,15 @@ class DiffusionConfig(PreTrainedConfig):
             )
         if self.use_se3_relative and self.se3_pos_scale <= 0:
             raise ValueError(f"`se3_pos_scale` must be > 0. Got {self.se3_pos_scale}.")
+        if self.use_se3_normalize:
+            if not self.use_se3_relative:
+                raise ValueError("`use_se3_normalize` requires `use_se3_relative`.")
+            required = {"state_min", "state_max", "action_min", "action_max"}
+            if not isinstance(self.se3_rel_stats, dict) or not required <= set(self.se3_rel_stats):
+                raise ValueError(
+                    f"`use_se3_normalize` needs `se3_rel_stats` with keys {sorted(required)} "
+                    "(fit them with compute_se3_rel_stats.py)."
+                )
 
         if self.resize_shape is not None and (
             len(self.resize_shape) != 2 or any(d <= 0 for d in self.resize_shape)
