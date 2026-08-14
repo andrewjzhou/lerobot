@@ -293,8 +293,12 @@ def test_merge_replaces_queue_when_rtc_enabled(action_queue_rtc_enabled, sample_
 
 
 def test_merge_respects_real_delay(action_queue_rtc_enabled, sample_actions):
-    """Test merge() correctly applies real_delay when RTC is enabled."""
+    """Test merge() correctly applies real_delay when RTC is enabled.
+
+    Note: the FIRST merge of a window never skips (robot was holding), so
+    the delay contract is tested on the second merge."""
     delay = 10
+    action_queue_rtc_enabled.merge(sample_actions["short"], sample_actions["short"], real_delay=0)
     action_queue_rtc_enabled.merge(sample_actions["original"], sample_actions["processed"], real_delay=delay)
 
     # Queue should have original length minus delay
@@ -330,6 +334,7 @@ def test_merge_with_large_delay(action_queue_rtc_enabled, sample_actions):
     """Test merge() with delay larger than action sequence."""
     # Delay is larger than sequence length
     delay = 100
+    action_queue_rtc_enabled.merge(sample_actions["short"], sample_actions["short"], real_delay=0)
     action_queue_rtc_enabled.merge(sample_actions["short"], sample_actions["short"], real_delay=delay)
 
     # Queue should be empty (delay >= length)
@@ -878,6 +883,7 @@ def test_blend_skipped_when_nothing_ever_served():
     unchanged (first-chunk case is handled by the seed path instead)."""
     queue = _blend_queue(3)
     old = torch.zeros(5, 6)
+    queue.merge(old, old, real_delay=0)
     queue.merge(old, old, real_delay=5)  # delay swallows the whole chunk
     assert queue.qsize() == 0
 
