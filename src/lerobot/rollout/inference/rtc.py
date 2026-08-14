@@ -398,6 +398,39 @@ class RTCInferenceEngine(InferenceEngine):
     # RTC: background inference thread
     # ------------------------------------------------------------------
 
+    def _synthetic_warmup(self, device, n: int = 3) -> None:
+        """Run n dummy inferences with synthetic inputs before serving any
+        real observation, so the FIRST real inference never pays the one-off
+        CUDA/cudnn autotuning cost (0.5-1.5 s). Nothing is executed — the
+        outputs are discarded and the policy is reset afterwards."""
+        try:
+            cfgp = self._policy.config
+            n_obs = getattr(cfgp, "n_obs_steps", 1)
+            identity9 = torch.tensor([0., 0., 0., 1., 0., 0., 0., 1., 0.])
+            batch = {}
+            for key, ft in cfgp.input_features.items():
+                shape = tuple(ft.shape)
+                if "image" in key:
+                    batch[key] = torch.zeros(1, n_obs, *shape, device=device)
+                elif shape == (9,):
+                    batch[key] = identity9.repeat(1, n_obs, 1).to(device)
+                else:
+                    batch[key] = torch.zeros(1, n_obs, *shape, device=device)
+            batch["task"] = ["warmup"]
+            t0 = time.perf_counter()
+            for _ in range(n):
+                with torch.inference_mode():
+                    self._policy.predict_action_chunk({k: (v.clone() if isinstance(v, torch.Tensor) else v)
+                                                       for k, v in batch.items()})
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            self._policy.reset()
+            logger.info("Synthetic model warmup: %d inferences in %.2fs "
+                        "(first real inference will run at steady-state speed)",
+                        n, time.perf_counter() - t0)
+        except Exception:
+            logger.exception("Synthetic warmup failed (continuing without)")
+
     def _rtc_loop(self) -> None:
         """Background thread that generates action chunks via RTC."""
         try:
@@ -410,6 +443,7 @@ class RTCInferenceEngine(InferenceEngine):
             # not seed the latency tracker or delay compensation runs ~2x-6x
             # pessimistic for the rest of the session (merges land after the
             # old chunk is exhausted -> lurch at every chunk boundary).
+            self._synthetic_warmup(policy_device)
             warmup_required = max(1, self._compile_warmup_inferences) if self._use_torch_compile else 1
             inference_count = 0
             consecutive_errors = 0
