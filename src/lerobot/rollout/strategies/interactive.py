@@ -265,7 +265,7 @@ class InteractiveStrategy(BaseStrategy):
 
             dt = time.perf_counter() - loop_start
             if log is not None and action_dict:
-                self._log_step(log, loop_start - start, obs, action_dict, dt)
+                self._log_step(log, loop_start - start, obs, action_dict, dt, loop_start)
             if (sleep_t := control_interval - dt) > 0:
                 precise_sleep(sleep_t)
         engine.pause()
@@ -274,12 +274,16 @@ class InteractiveStrategy(BaseStrategy):
         logger.info("inference STOPPED (%s) — number keys to reposition, g to rerun", why)
         return why
 
-    def _log_step(self, log, t, obs, action_dict, dt):
+    def _log_step(self, log, t, obs, action_dict, dt, t_abs=float('nan')):
         if log["state_keys"] is None:
             log["state_keys"] = sorted(k for k in obs if k.endswith((".pos", ".torque")))
             log["action_keys"] = sorted(action_dict) if action_dict else []
         log["t"].append(t)
         log["dt"].append(dt)
+        info = getattr(self._engine, "last_action_info", None)
+        log.setdefault("plan", []).append(
+            (info[0], info[1], info[2]) if info else (-1, -1, float("nan")))
+        log.setdefault("t_abs", []).append(t_abs)
         log["state"].append([float(obs[k]) for k in log["state_keys"]])
         log["action"].append([float(action_dict.get(k, np.nan)) for k in log["action_keys"]])
         if len(log["t"]) % self.config.log_frame_stride == 0:
@@ -297,7 +301,9 @@ class InteractiveStrategy(BaseStrategy):
         d.mkdir(parents=True, exist_ok=True)
         np.savez(d / "trace.npz",
                  t=np.array(log["t"]), dt=np.array(log["dt"]),
-                 state=np.array(log["state"]), action=np.array(log["action"]))
+                 state=np.array(log["state"]), action=np.array(log["action"]),
+                 plan=np.array(log.get("plan", []), dtype=np.float64),
+                 t_abs=np.array(log.get("t_abs", []), dtype=np.float64))
         for step, cam, buf in log["frames"]:
             (d / f"{cam}_{step:04d}.jpg").write_bytes(buf)
         (d / "meta.json").write_text(json.dumps({

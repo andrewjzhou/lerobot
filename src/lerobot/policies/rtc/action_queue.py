@@ -67,6 +67,11 @@ class ActionQueue:
         self.policy_queue = None
         self.lock = Lock()
         self.last_index = 0
+        # provenance for timing audits: which plan, which row, born when
+        self.chunk_seq = 0
+        self._skip = 0
+        self._birth_t = None
+        self.last_info = None      # (chunk_seq, plan_row, birth_t) of last get()
         self.cfg = cfg
         # Optional blend anchor for the FIRST chunk of a run: the robot's
         # pose at inference start (processed/robot action space). Later
@@ -85,6 +90,7 @@ class ActionQueue:
                 return None
 
             action = self.queue[self.last_index]
+            self.last_info = (self.chunk_seq, self._skip + self.last_index, self._birth_t)
             self.last_index += 1
             return action.clone()
 
@@ -181,6 +187,7 @@ class ActionQueue:
         real_delay: int,
         action_index_before_inference: int | None = None,
         policy_actions: Tensor | None = None,
+        birth_t: float | None = None,
     ):
         """Merge new actions into the queue.
 
@@ -201,6 +208,9 @@ class ActionQueue:
         with self.lock:
             if self.cfg.enabled:
                 delay = self._check_and_resolve_delays(real_delay, action_index_before_inference)
+                self.chunk_seq += 1
+                self._birth_t = birth_t
+                self._skip = max(0, min(delay, len(original_actions), len(processed_actions)))
                 self._replace_actions_queue(
                     original_actions, processed_actions, delay, policy_actions
                 )

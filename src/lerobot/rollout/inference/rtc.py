@@ -309,6 +309,13 @@ class RTCInferenceEngine(InferenceEngine):
                 logger.info("RTC inference thread stopped")
             self._rtc_thread = None
 
+    @property
+    def last_action_info(self):
+        """(chunk_seq, plan_row, birth_t) of the most recently served action
+        — written per tick into rollout traces for timing audits."""
+        q = self._action_queue
+        return q.last_info if q is not None else None
+
     def pause(self) -> None:
         """Pause the RTC background thread."""
         logger.info("Pausing RTC inference thread")
@@ -538,7 +545,8 @@ class RTCInferenceEngine(InferenceEngine):
                         queue.merge(
                             original, processed,
                             new_delay + self._rtc_config.execution_latency_ticks,
-                            idx_before, policy_actions=policy_abs)
+                            idx_before, policy_actions=policy_abs,
+                            birth_t=current_time)
 
                         # throttled background viz (no control-loop impact)
                         uv_n = getattr(
