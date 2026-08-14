@@ -208,6 +208,14 @@ class ActionQueue:
         with self.lock:
             if self.cfg.enabled:
                 delay = self._check_and_resolve_delays(real_delay, action_index_before_inference)
+                if self.queue is None:
+                    # FIRST chunk of a window: the robot was HOLDING while
+                    # inference ran, so no plan time actually elapsed — the
+                    # plan starts at the held pose and row 0 is the correct
+                    # first action. Skipping rows here jumps the arm to a
+                    # pose the trajectory only reaches delay*tick later
+                    # (the "first inference is always the worst" lunge).
+                    delay = 0
                 self.chunk_seq += 1
                 self._birth_t = birth_t
                 self._skip = max(0, min(delay, len(original_actions), len(processed_actions)))
