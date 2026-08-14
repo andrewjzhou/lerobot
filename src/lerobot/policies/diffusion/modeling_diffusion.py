@@ -298,7 +298,8 @@ class DiffusionPolicy(PreTrainedPolicy):
                 if self.config.n_obs_steps == 1 and batch[key].ndim == 4:
                     batch[key] = batch[key].unsqueeze(1)
             batch[OBS_IMAGES] = self._stack_views(batch)
-            if self.training and (self.config.aug_glare_p > 0 or self.config.aug_noise_p > 0):
+            if self.training and (self.config.aug_glare_p > 0 or self.config.aug_noise_p > 0
+                                  or self.config.aug_mask_p > 0):
                 batch[OBS_IMAGES] = _train_augment(batch[OBS_IMAGES].clone(), self.config)
         if self.config.use_se3_relative:
             batch = self._se3_relativize_batch(batch)
@@ -338,6 +339,23 @@ def _train_augment(imgs: Tensor, cfg) -> Tensor:
                 if rect is not None:
                     glow = glow * rect
                 imgs[bi, :, cam] = imgs[bi, :, cam] + glow
+    if cfg.aug_mask_p > 0 and cfg.aug_mask_rect is not None:
+        b_, s_, n_, c_, hh, ww = imgs.shape
+        x0b, y0b, x1b, y1b = cfg.aug_mask_rect
+        jx_f, jy_f = cfg.aug_mask_jitter
+        cams = ([cfg.aug_mask_cam_index] if cfg.aug_mask_cam_index is not None
+                else list(range(n_)))
+        for bi in range(b_):
+            if torch.rand(1).item() >= cfg.aug_mask_p:
+                continue                       # unmasked sample (p<1 draws)
+            jx = (torch.rand(1).item() * 2 - 1) * jx_f
+            jy = (torch.rand(1).item() * 2 - 1) * jy_f
+            e = (torch.rand(4) * 2 - 1) * cfg.aug_mask_edge_jitter
+            x0 = int(max(0.0, x0b + jx + e[0]) * ww); y0 = int(max(0.0, y0b + jy + e[1]) * hh)
+            x1 = int(min(1.0, x1b + jx + e[2]) * ww); y1 = int(min(1.0, y1b + jy + e[3]) * hh)
+            for ni in cams:
+                imgs[bi, :, ni, :, :y0, :] = 0; imgs[bi, :, ni, :, y1:, :] = 0
+                imgs[bi, :, ni, :, :, :x0] = 0; imgs[bi, :, ni, :, :, x1:] = 0
     if cfg.aug_noise_p > 0:
         sel = torch.rand(b, device=dev) < cfg.aug_noise_p
         idx = sel.nonzero(as_tuple=True)[0]

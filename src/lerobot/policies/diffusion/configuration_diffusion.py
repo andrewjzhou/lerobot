@@ -218,6 +218,16 @@ class DiffusionConfig(PreTrainedConfig):
                                                # glare off baked-masked regions
     aug_noise_p: float = 0.0          # per-sample probability of pixel noise
     aug_noise_std: float = 0.10       # gaussian std (normalized units)
+    # --- train-only JITTERED BLACK MASK (per Andrew 2026-08-14): the tray
+    # blackout is applied at TRAIN TIME on unmasked images, with the rect
+    # randomly shifted so the mask edge cannot become a spatial landmark.
+    # Deploy applies the STATIC base rect (adapter-side). Rect + jitter in
+    # normalized [0,1] image coords; jitter fractions are of W/H.
+    aug_mask_p: float = 0.0            # 0 = off (dataset presumed pre-masked)
+    aug_mask_rect: tuple[float, float, float, float] | None = None
+    aug_mask_cam_index: int | None = None   # which view gets the mask
+    aug_mask_jitter: tuple[float, float] = (0.10, 0.10)   # +-frac of W, H
+    aug_mask_edge_jitter: float = 0.016     # extra +-frac per edge
 
     # Inference: reuse ONE sampling latent for the whole rollout (set on
     # reset(), reused every predict_action_chunk). Consecutive replans become
