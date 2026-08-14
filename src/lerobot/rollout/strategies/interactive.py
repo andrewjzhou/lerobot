@@ -284,6 +284,8 @@ class InteractiveStrategy(BaseStrategy):
         log.setdefault("plan", []).append(
             (info[0], info[1], info[2]) if info else (-1, -1, float("nan")))
         log.setdefault("t_abs", []).append(t_abs)
+        ph = getattr(self._interpolator, "phase", (0, 1))
+        log.setdefault("interp", []).append(ph)
         log["state"].append([float(obs[k]) for k in log["state_keys"]])
         log["action"].append([float(action_dict.get(k, np.nan)) for k in log["action_keys"]])
         if len(log["t"]) % self.config.log_frame_stride == 0:
@@ -303,7 +305,8 @@ class InteractiveStrategy(BaseStrategy):
                  t=np.array(log["t"]), dt=np.array(log["dt"]),
                  state=np.array(log["state"]), action=np.array(log["action"]),
                  plan=np.array(log.get("plan", []), dtype=np.float64),
-                 t_abs=np.array(log.get("t_abs", []), dtype=np.float64))
+                 t_abs=np.array(log.get("t_abs", []), dtype=np.float64),
+                 interp=np.array(log.get("interp", []), dtype=np.int64))
         for step, cam, buf in log["frames"]:
             (d / f"{cam}_{step:04d}.jpg").write_bytes(buf)
         (d / "meta.json").write_text(json.dumps({

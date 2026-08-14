@@ -64,6 +64,13 @@ class ActionInterpolator:
         """Whether interpolation is active (multiplier > 1)."""
         return self.multiplier > 1
 
+    @property
+    def phase(self) -> tuple[int, int]:
+        """(index of the LAST served sub-step, multiplier) — sub-step
+        `multiplier` is the exact policy row endpoint; smaller indices are
+        interpolated points on the ramp toward it. For controller debugging."""
+        return (self._idx, self.multiplier)
+
     def reset(self):
         """Reset interpolation state (call between episodes)."""
         self._prev = None
