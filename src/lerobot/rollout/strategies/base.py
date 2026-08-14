@@ -45,6 +45,10 @@ class BaseStrategy(RolloutStrategy):
         cfg = ctx.runtime.cfg
         robot = ctx.hardware.robot_wrapper
         interpolator = self._interpolator
+        # A stale _prev from the previous inference window would make the
+        # first ramp interpolate from wherever the arm USED to be ->
+        # violent lunge at window start (observed 23-44 deg, 2026-08-14).
+        interpolator.reset()  # stale _prev guard
 
         control_interval = interpolator.get_control_interval(cfg.fps)
 
