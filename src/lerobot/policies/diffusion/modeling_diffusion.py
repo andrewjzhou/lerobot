@@ -154,8 +154,10 @@ class DiffusionPolicy(PreTrainedPolicy):
         if ACTION not in batch:
             return batch
         pad = self.config.action_lpf_pad
+        n_obs = self.config.n_obs_steps
         act = batch[ACTION]
-        if act.shape[1] != self.config.horizon + 2 * pad:
+        expect = self.config.horizon + 2 * pad + (n_obs - 1)
+        if act.shape[1] != expect:
             return batch                       # not padded (e.g. inference)
         k = getattr(self, "_lpf_kernel", None)
         if k is None or k.device != act.device or k.dtype != act.dtype:
@@ -176,11 +178,16 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._lpf_kernel = k
         b, t, d = act.shape
         x = act.permute(0, 2, 1).reshape(b * d, 1, t)
-        y = F.conv1d(x, k.view(1, 1, -1))      # 'valid' -> t - 2*pad = horizon
+        y = F.conv1d(x, k.view(1, 1, -1))      # 'valid' -> horizon + n_obs - 1
+        out = y.reshape(b, d, -1).permute(0, 2, 1).contiguous()
         batch = dict(batch)
-        batch[ACTION] = y.reshape(b, d, self.config.horizon).permute(0, 2, 1).contiguous()
+        # out row i corresponds to action-delta (1 - n_obs - 1 + i), i.e. to
+        # pose(t - n_obs + 1 + i). Actions start one row later than the state.
+        batch[ACTION] = out[:, n_obs - 1: n_obs - 1 + self.config.horizon]
+        batch[OBS_STATE] = out[:, :n_obs]
         if "action_is_pad" in batch and batch["action_is_pad"].shape[1] != self.config.horizon:
-            batch["action_is_pad"] = batch["action_is_pad"][:, pad:pad + self.config.horizon]
+            off = pad + n_obs - 1
+            batch["action_is_pad"] = batch["action_is_pad"][:, off:off + self.config.horizon]
         return batch
 
     def _se3_relativize_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:

@@ -432,8 +432,13 @@ class DiffusionConfig(PreTrainedConfig):
     def action_delta_indices(self) -> list:
         lo = 1 - self.n_obs_steps
         hi = lo + self.horizon
-        if self.action_lpf_hz > 0:            # fetch padding for the filter
-            lo -= self.action_lpf_pad
+        if self.action_lpf_hz > 0:
+            # padding for the filter, PLUS (n_obs_steps - 1) extra rows on the
+            # left so the observation-state timesteps are inside this window
+            # too: dataset action[j] == state[j+1], so state at delta d is
+            # action at delta d-1. Filtering both from one fetch avoids
+            # over-fetching observation keys (which would decode extra video).
+            lo -= self.action_lpf_pad + (self.n_obs_steps - 1)
             hi += self.action_lpf_pad
         return list(range(lo, hi))
 
