@@ -277,6 +277,16 @@ class RolloutConfig:
     fps: float = 30.0
     duration: float = 0.0  # 0 = infinite (24/7 mode)
     interpolation_multiplier: int = 1
+    # Virtual damper on the SENT command: q_send = q_cmd - c * (v_meas - v_cmd),
+    # i.e. damping on the VELOCITY ERROR only — it opposes the arm overrunning
+    # its setpoint without adding lag when tracking is already correct (a plain
+    # low-pass would round contact corners; that was tried and reverted).
+    # Units: seconds (c has dimensions of time: deg per deg/s). 0 = off.
+    # Per-joint list or a single float for all joints. Applies to .pos keys.
+    virtual_damping: float | list[float] = 0.0
+    # Hard cap on the correction so a bad velocity estimate can never produce
+    # a large jump (degrees).
+    virtual_damping_max_deg: float = 1.5
     device: str | None = None
     task: str = ""
     display_data: bool = False

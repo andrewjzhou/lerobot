@@ -275,6 +275,48 @@ def estimate_max_episode_seconds(
 # ---------------------------------------------------------------------------
 
 
+def _apply_virtual_damping(action_dict: dict, obs_raw: dict, ctx) -> dict:
+    """Damp the velocity ERROR: q_send = q_cmd - c * (v_meas - v_cmd).
+
+    The motors' onboard PD already has a kd term; this adds damping the same
+    way a heavier kd would, but from the host, for cases where the firmware
+    gains can't be changed. It is a no-op while the arm tracks its setpoint
+    (v_meas == v_cmd) and only bites when the arm overruns — unlike a
+    low-pass filter, which lags every motion and rounds contact corners.
+    """
+    cfg = ctx.runtime.cfg
+    c = getattr(cfg, "virtual_damping", 0.0)
+    if isinstance(c, (int, float)) and c == 0.0:
+        return action_dict
+    st = getattr(ctx.runtime, "_vdamp_state", None)
+    now = time.perf_counter()
+    keys = [k for k in action_dict if k.endswith(".pos") and k in obs_raw]
+    if st is None:
+        ctx.runtime._vdamp_state = {"t": now, "cmd": dict(action_dict),
+                                    "meas": {k: float(obs_raw[k]) for k in keys}}
+        return action_dict
+    dt = now - st["t"]
+    if not (1e-4 < dt < 0.2):                       # stale/absurd -> resync
+        st.update(t=now, cmd=dict(action_dict),
+                  meas={k: float(obs_raw[k]) for k in keys})
+        return action_dict
+    cmax = float(getattr(cfg, "virtual_damping_max_deg", 1.5))
+    out = dict(action_dict)
+    for i, k in enumerate(keys):
+        ck = c[i] if isinstance(c, (list, tuple)) and i < len(c) else (
+            c if isinstance(c, (int, float)) else 0.0)
+        if ck == 0.0:
+            continue
+        m = float(obs_raw[k])
+        v_meas = (m - st["meas"].get(k, m)) / dt
+        v_cmd = (action_dict[k] - st["cmd"].get(k, action_dict[k])) / dt
+        corr = -ck * (v_meas - v_cmd)
+        out[k] = action_dict[k] + max(-cmax, min(cmax, corr))
+    st.update(t=now, cmd=dict(action_dict),
+              meas={k: float(obs_raw[k]) for k in keys})
+    return out
+
+
 def send_next_action(
     obs_processed: dict,
     obs_raw: dict,
@@ -314,6 +356,7 @@ def send_next_action(
     if len(interp) != len(ordered_keys):
         raise ValueError(f"Interpolated tensor length ({len(interp)}) != action keys ({len(ordered_keys)})")
     action_dict = {k: interp[i].item() for i, k in enumerate(ordered_keys)}
+    action_dict = _apply_virtual_damping(action_dict, obs_raw, ctx)
     processed = ctx.processors.robot_action_processor((action_dict, obs_raw))
     ctx.hardware.robot_wrapper.send_action(processed)
     return action_dict
