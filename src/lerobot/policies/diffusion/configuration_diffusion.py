@@ -172,6 +172,10 @@ class DiffusionConfig(PreTrainedConfig):
     # consistent. 0 = off.
     action_lpf_hz: float = 0.0
     action_lpf_pad: int = 12
+    # Sample rate of the action sequence (= dataset fps). Must be set
+    # explicitly when action_lpf_hz > 0; the policy config has no fps of
+    # its own and guessing it would silently mis-tune the cutoff.
+    action_lpf_fps: float = 0.0
     # {"state_min": [9], "state_max": [9], "action_min": [9],
     #  "action_max": [9]} — raw relativized units (meters / rot6d).
     se3_rel_stats: dict | None = None
@@ -330,6 +334,14 @@ class DiffusionConfig(PreTrainedConfig):
             )
         if self.use_se3_relative and self.se3_pos_scale <= 0:
             raise ValueError(f"`se3_pos_scale` must be > 0. Got {self.se3_pos_scale}.")
+        if self.action_lpf_hz > 0:
+            if self.action_lpf_fps <= 0:
+                raise ValueError("`action_lpf_hz` requires `action_lpf_fps` (dataset fps).")
+            if self.action_lpf_hz >= self.action_lpf_fps / 2:
+                raise ValueError(
+                    f"`action_lpf_hz` ({self.action_lpf_hz}) must be below Nyquist "
+                    f"({self.action_lpf_fps / 2})."
+                )
         if self.use_se3_normalize:
             if not self.use_se3_relative:
                 raise ValueError("`use_se3_normalize` requires `use_se3_relative`.")

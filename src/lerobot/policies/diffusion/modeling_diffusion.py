@@ -167,7 +167,7 @@ class DiffusionPolicy(PreTrainedPolicy):
             # windowed-sinc of the same length does NOT match it (checked:
             # 0.58 mm divergence, ~70% of the filter's own effect).
             taps = 2 * pad + 1
-            _b, _a = _ss.butter(2, self.config.action_lpf_hz / (self.config.fps / 2.0), "low")
+            _b, _a = _ss.butter(2, self.config.action_lpf_hz / (self.config.action_lpf_fps / 2.0), "low")
             _imp = _np.zeros(4 * taps); _imp[len(_imp) // 2] = 1.0
             _h = _ss.filtfilt(_b, _a, _imp)
             _c = len(_imp) // 2
