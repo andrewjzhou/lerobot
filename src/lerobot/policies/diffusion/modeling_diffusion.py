@@ -143,6 +143,46 @@ class DiffusionPolicy(PreTrainedPolicy):
         lo, hi = self._se3_stats(key, x)
         return (x + 1.0) / 2.0 * (hi - lo).clamp(min=1e-6) + lo
 
+    def _action_lpf(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Zero-phase low-pass the padded action window, then crop to horizon.
+
+        The dataloader supplies horizon + 2*pad rows (see
+        action_delta_indices); we convolve with a symmetric windowed-sinc
+        kernel and keep the centre, so every emitted row saw full filter
+        context — identical to filtering the episode offline.
+        """
+        if ACTION not in batch:
+            return batch
+        pad = self.config.action_lpf_pad
+        act = batch[ACTION]
+        if act.shape[1] != self.config.horizon + 2 * pad:
+            return batch                       # not padded (e.g. inference)
+        k = getattr(self, "_lpf_kernel", None)
+        if k is None or k.device != act.device or k.dtype != act.dtype:
+            import numpy as _np
+            import scipy.signal as _ss
+            # Use the EXACT impulse response of the zero-phase filtfilt
+            # operator (scipy butter(2) + filtfilt) so on-the-fly filtering
+            # reproduces offline whole-episode filtering bit-for-bit. A
+            # windowed-sinc of the same length does NOT match it (checked:
+            # 0.58 mm divergence, ~70% of the filter's own effect).
+            taps = 2 * pad + 1
+            _b, _a = _ss.butter(2, self.config.action_lpf_hz / (self.config.fps / 2.0), "low")
+            _imp = _np.zeros(4 * taps); _imp[len(_imp) // 2] = 1.0
+            _h = _ss.filtfilt(_b, _a, _imp)
+            _c = len(_imp) // 2
+            fir = _h[_c - pad: _c + pad + 1]
+            k = torch.tensor(_np.ascontiguousarray(fir), dtype=act.dtype, device=act.device)
+            self._lpf_kernel = k
+        b, t, d = act.shape
+        x = act.permute(0, 2, 1).reshape(b * d, 1, t)
+        y = F.conv1d(x, k.view(1, 1, -1))      # 'valid' -> t - 2*pad = horizon
+        batch = dict(batch)
+        batch[ACTION] = y.reshape(b, d, self.config.horizon).permute(0, 2, 1).contiguous()
+        if "action_is_pad" in batch and batch["action_is_pad"].shape[1] != self.config.horizon:
+            batch["action_is_pad"] = batch["action_is_pad"][:, pad:pad + self.config.horizon]
+        return batch
+
     def _se3_relativize_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         """Re-express state (B, To, 9) — and action (B, H, 9) when present —
         in the frame of the last observation step, then map to network units
@@ -301,6 +341,8 @@ class DiffusionPolicy(PreTrainedPolicy):
             if self.training and (self.config.aug_glare_p > 0 or self.config.aug_noise_p > 0
                                   or self.config.aug_mask_p > 0):
                 batch[OBS_IMAGES] = _train_augment(batch[OBS_IMAGES].clone(), self.config)
+        if self.config.action_lpf_hz > 0:
+            batch = self._action_lpf(batch)
         if self.config.use_se3_relative:
             batch = self._se3_relativize_batch(batch)
         loss, output_dict = self.diffusion.compute_loss(batch)

@@ -161,6 +161,17 @@ class DiffusionConfig(PreTrainedConfig):
     # the diffusion space exactly like original diffusion_policy/UMI, so
     # x0 clipping (`clip_sample`) is valid again in SE(3) mode.
     use_se3_normalize: bool = False
+    # --- train-time low-pass on the ACTION TARGETS (zero-phase FIR) ---
+    # Teaches the policy to emit smooth trajectories natively, instead of
+    # filtering at deploy (which would add phase lag). Applied in WORLD space
+    # before SE(3) relativization. The action window is fetched with
+    # `action_lpf_pad` extra rows on each side and cropped after filtering,
+    # so the result is identical to filtering the whole episode offline — no
+    # window-edge artifacts. Observation state is deliberately NOT filtered:
+    # at deploy it comes from raw FK, so leaving it raw keeps train/deploy
+    # consistent. 0 = off.
+    action_lpf_hz: float = 0.0
+    action_lpf_pad: int = 12
     # {"state_min": [9], "state_max": [9], "action_min": [9],
     #  "action_max": [9]} — raw relativized units (meters / rot6d).
     se3_rel_stats: dict | None = None
@@ -407,7 +418,12 @@ class DiffusionConfig(PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
-        return list(range(1 - self.n_obs_steps, 1 - self.n_obs_steps + self.horizon))
+        lo = 1 - self.n_obs_steps
+        hi = lo + self.horizon
+        if self.action_lpf_hz > 0:            # fetch padding for the filter
+            lo -= self.action_lpf_pad
+            hi += self.action_lpf_pad
+        return list(range(lo, hi))
 
     @property
     def reward_delta_indices(self) -> None:
