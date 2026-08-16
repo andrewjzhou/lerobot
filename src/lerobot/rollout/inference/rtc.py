@@ -553,10 +553,13 @@ class RTCInferenceEngine(InferenceEngine):
                             viz_head = None
                             # exact per-camera image window the policy consumes,
                             # oldest -> newest (dumped by the obs-pair viz)
+                            # RAW obs camera keys are the camera NAMES ("head",
+                            # "right_wrist") — not "observation.images.*" — so
+                            # detect frames by shape, like the trace logger does.
                             pair_cams: dict[str, list] = {}
                             for _o in window:
                                 for _k, _v in _o.items():
-                                    if "image" in _k and hasattr(_v, "shape"):
+                                    if getattr(_v, "ndim", 0) == 3:
                                         pair_cams.setdefault(_k, []).append(_v)
                             for o in window:
                                 fb = build_dataset_frame(self._hw_features, o, prefix="observation")
