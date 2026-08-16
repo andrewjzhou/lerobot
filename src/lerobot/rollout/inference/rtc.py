@@ -43,6 +43,7 @@ from lerobot.processor import (
 )
 from lerobot.utils.feature_utils import build_dataset_frame
 
+from ..chunk_trace import get_tracer as get_chunk_tracer
 from ..robot_wrapper import ThreadSafeRobot
 from .base import InferenceEngine
 
@@ -63,10 +64,36 @@ class _RolloutViz:
         import queue as _q
         self.enabled = os.environ.get("ROLLOUT_VIZ", "1") == "1"
         self.q = _q.Queue(maxsize=4)
+        self.qp = _q.Queue(maxsize=4)
         self.last_t = 0.0
+        self.last_pair_t = 0.0
         self.n = 0
+        self.n_pair = 0
         self.dir = None
         self.thread = None
+        self.pair_thread = None
+
+    def maybe_submit_pair(self, window_imgs, times):
+        """Save the exact n_obs image window the policy consumed, side by side
+        (oldest -> newest) with per-frame wall-clock and the gap between them.
+        Same throttle/queue as the main viz; never blocks inference."""
+        if not self.enabled or not window_imgs or self.n_pair >= self.MAX_FILES:
+            return
+        now = time.perf_counter()
+        if now - self.last_pair_t < self.VIZ_PERIOD_S:
+            return
+        self.last_pair_t = now
+        try:
+            import numpy as _np
+            imgs = []
+            for per_cam in window_imgs:
+                imgs.append([(_np.array(i.detach().cpu()) if hasattr(i, "detach") else _np.array(i)).copy()
+                             for i in per_cam])
+            self.qp.put_nowait((imgs, list(times), self.n_pair))
+            self.n_pair += 1
+        except Exception:  # noqa: BLE001
+            pass
+        self._ensure_thread()
 
     def maybe_submit(self, head_img, uv_norm, uv_stats, progress):
         if not self.enabled or head_img is None or self.n >= self.MAX_FILES:
@@ -82,14 +109,52 @@ class _RolloutViz:
             self.n += 1
         except Exception:  # noqa: BLE001 — viz must never break inference
             pass
-        if self.thread is None:
-            import threading
-            from pathlib import Path
+        self._ensure_thread()
+
+    def _ensure_thread(self):
+        import threading
+        from pathlib import Path
+        if self.dir is None:
             self.dir = Path("outputs/rollout_logs") / time.strftime("pixelviz-%Y%m%d-%H%M%S")
             self.dir.mkdir(parents=True, exist_ok=True)
+            logger.info("rollout viz -> %s", self.dir)
+        if self.thread is None:
             self.thread = threading.Thread(target=self._worker, daemon=True)
             self.thread.start()
-            logger.info("rollout viz -> %s", self.dir)
+        if self.pair_thread is None:
+            self.pair_thread = threading.Thread(target=self._pair_worker, daemon=True)
+            self.pair_thread.start()
+
+    def _pair_worker(self):
+        import cv2
+        import numpy as np
+        while True:
+            imgs, times, idx = self.qp.get()
+            try:
+                rows = []
+                for cam_i, per_cam in enumerate(imgs):
+                    tiles = []
+                    for j, im in enumerate(per_cam):
+                        if im.ndim == 3 and im.shape[0] in (1, 3):
+                            im = np.transpose(im, (1, 2, 0))
+                        if im.dtype != np.uint8:
+                            im = (np.clip(im, 0, 1) * 255).astype(np.uint8)
+                        im = cv2.cvtColor(im, cv2.COLOR_RGB2BGR)
+                        im = cv2.resize(im, (480, 360))
+                        lbl = "OLDEST (t-1)" if j == 0 else "NEWEST (t, anchor)"
+                        cv2.putText(im, lbl, (8, 24), 0, 0.65, (0, 255, 255), 2)
+                        if j < len(times):
+                            cv2.putText(im, f"t={times[j]:.3f}s", (8, 348), 0, 0.55, (0, 255, 255), 2)
+                        tiles.append(im)
+                    rows.append(np.hstack(tiles))
+                grid = np.vstack(rows)
+                if len(times) >= 2:
+                    gap = (times[-1] - times[0]) * 1000
+                    cv2.putText(grid, f"gap between frames: {gap:.1f} ms", (8, grid.shape[0] - 10),
+                                0, 0.7, (0, 255, 0), 2)
+                cv2.imwrite(str(self.dir / f"obspair_{idx:03d}.jpg"), grid)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _worker(self):
         import cv2
@@ -211,6 +276,9 @@ class RTCInferenceEngine(InferenceEngine):
         # window them at generation time.
         self._n_obs_steps = int(getattr(policy.config, "n_obs_steps", 1) or 1)
         self._obs_history: deque = deque(maxlen=self._n_obs_steps)
+        # wall-clock of each obs in _obs_history (same order), for the
+        # observation-pair dump: lets frame ORDER and capture GAPS be checked
+        self._obs_times: deque = deque(maxlen=self._n_obs_steps)
         self._obs_lock = Lock()
         self._policy_active = Event()
         self._compile_warmup_done = Event()
@@ -377,6 +445,7 @@ class RTCInferenceEngine(InferenceEngine):
             self._action_queue.clear()
         with self._obs_lock:
             self._obs_history.clear()
+            self._obs_times.clear()
 
     # ------------------------------------------------------------------
     # Action production (called from main thread)
@@ -393,6 +462,7 @@ class RTCInferenceEngine(InferenceEngine):
         with self._obs_lock:
             self._obs_holder["obs"] = obs
             self._obs_history.append(obs)
+            self._obs_times.append(time.perf_counter())
 
     # ------------------------------------------------------------------
     # RTC: background inference thread
@@ -476,10 +546,18 @@ class RTCInferenceEngine(InferenceEngine):
                             # as the policy was trained.
                             with self._obs_lock:
                                 window = list(self._obs_history)
+                                window_times = list(self._obs_times)
                             while len(window) < self._n_obs_steps:
                                 window.insert(0, window[0])
                             frames = []
                             viz_head = None
+                            # exact per-camera image window the policy consumes,
+                            # oldest -> newest (dumped by the obs-pair viz)
+                            pair_cams: dict[str, list] = {}
+                            for _o in window:
+                                for _k, _v in _o.items():
+                                    if "image" in _k and hasattr(_v, "shape"):
+                                        pair_cams.setdefault(_k, []).append(_v)
                             for o in window:
                                 fb = build_dataset_frame(self._hw_features, o, prefix="observation")
                                 if self._action_adapter is not None:
@@ -582,12 +660,26 @@ class RTCInferenceEngine(InferenceEngine):
                             idx_before, policy_actions=policy_abs,
                             birth_t=current_time)
 
+                        if (_tracer := get_chunk_tracer()) is not None:
+                            _tracer.record_chunk(
+                                seq=queue.chunk_seq, birth_t=current_time,
+                                actions=processed,
+                                delay_ticks=new_delay + self._rtc_config.execution_latency_ticks,
+                                idx_before=idx_before, policy_actions=policy_abs)
+
                         # throttled background viz (no control-loop impact)
                         uv_n = getattr(
                             getattr(self._policy, "diffusion", self._policy),
                             "_last_pixel_norm", None)
                         self._viz.maybe_submit(viz_head if self._n_obs_steps > 1 else None,
                                                uv_n, self._uv_stats, self.last_progress)
+                        if self._n_obs_steps > 1:
+                            try:
+                                self._viz.maybe_submit_pair(
+                                    [pair_cams[k] for k in sorted(pair_cams)],
+                                    [t - window_times[0] for t in window_times])
+                            except Exception:  # noqa: BLE001 — viz must never break inference
+                                pass
 
                         if (
                             is_warmup
