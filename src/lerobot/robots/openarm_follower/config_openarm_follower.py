@@ -114,6 +114,14 @@ class OpenArmFollowerConfigBase:
     # negligibly).
     gravity_ff_xml: str | None = None
     gravity_ff_scale: float = 1.0
+    # --- explicit VISCOUS DAMPING feedforward: tau += -damping_ff * qdot ---
+    # Added to the same tau_ff slot as gravity, using the MEASURED joint speed
+    # from the last get_observation. This damps without touching kd, so the
+    # position loop's following behaviour (kd/kp) is unchanged — unlike raising
+    # kd, which also increases the (kd/kp)*w tracking lag because we send
+    # v_des = 0. Units: N*m per rad/s, per joint (list of 7) or scalar.
+    # 0 = off. Clipped into the same per-motor torque cap as gravity.
+    damping_ff: float | list[float] = 0.0
 
     # Values for joint limits. Can be overridden via CLI (for custom values) or by setting config.side to either 'left' or 'right'.
     # If config.side is left set to None and no CLI values are passed, the default joint limit values are small for safety.

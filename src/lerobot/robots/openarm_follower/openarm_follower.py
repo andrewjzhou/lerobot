@@ -86,6 +86,9 @@ class OpenArmFollower(Robot):
 
         # Initialize cameras
         self.cameras = make_cameras_from_configs(config.cameras)
+        # last measured joint velocities (rad/s), refreshed by get_observation;
+        # consumed by the damping feedforward in send_action
+        self._last_vel: dict[str, float] = {}
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -265,7 +268,7 @@ class OpenArmFollower(Robot):
                 for motor in self.bus.motors}
 
     @check_if_not_connected
-    def get_observation(self) -> RobotObservation:
+    def get_observation(self) -> RobotObservation:  # noqa: D401
         """
         Get current observation from robot including position, velocity, and torque.
 
@@ -281,6 +284,9 @@ class OpenArmFollower(Robot):
         for motor in self.bus.motors:
             state = states.get(motor, {})
             obs_dict[f"{motor}.pos"] = state.get("position", 0.0)
+            # always cache velocity (rad/s) — the damping feedforward needs it
+            # even when it isn't exported into the observation dict
+            self._last_vel[motor] = float(state.get("velocity", 0.0))
             if self.config.use_velocity_and_torque:
                 obs_dict[f"{motor}.vel"] = state.get("velocity", 0.0)
                 obs_dict[f"{motor}.torque"] = state.get("torque", 0.0)
@@ -372,24 +378,36 @@ class OpenArmFollower(Robot):
                 )
             commands[motor_name] = (kp, kd, position_degrees, 0.0, 0.0)
 
-        if getattr(self, "_grav", None) is not None:
-            g = self._grav
-            import numpy as _np
+        damp = getattr(self.config, "damping_ff", 0.0)
+        damp_on = (isinstance(damp, (list, tuple)) and any(damp)) or (
+            isinstance(damp, (int, float)) and damp != 0.0)
 
-            for i in range(1, 8):
-                name = f"joint_{i}"
-                if name in goal_pos:
-                    g["d"].qpos[g["qadr"][i - 1]] = _np.radians(goal_pos[name])
-            g["d"].qvel[:] = 0.0
-            g["mujoco"].mj_forward(g["m"], g["d"])
+        if getattr(self, "_grav", None) is not None or damp_on:
+            import numpy as _np
+            g = getattr(self, "_grav", None)
+
+            if g is not None:
+                for i in range(1, 8):
+                    name = f"joint_{i}"
+                    if name in goal_pos:
+                        g["d"].qpos[g["qadr"][i - 1]] = _np.radians(goal_pos[name])
+                g["d"].qvel[:] = 0.0
+                g["mujoco"].mj_forward(g["m"], g["d"])
             for i in range(1, 8):
                 name = f"joint_{i}"
                 if name not in commands:
                     continue
-                cap = g["cap"].get(self.config.motor_config[name][2], 3.0)
-                tau = float(_np.clip(
-                    self.config.gravity_ff_scale * g["d"].qfrc_bias[g["dofadr"][i - 1]],
-                    -cap, cap))
+                cap = (g["cap"].get(self.config.motor_config[name][2], 3.0)
+                       if g is not None else 3.0)
+                tau = 0.0
+                if g is not None:
+                    tau += self.config.gravity_ff_scale * g["d"].qfrc_bias[g["dofadr"][i - 1]]
+                if damp_on:
+                    b = damp[i - 1] if isinstance(damp, (list, tuple)) else damp
+                    # MEASURED joint speed (rad/s) from the last observation;
+                    # opposes motion => -b * qdot
+                    tau += -float(b) * self._last_vel.get(name, 0.0)
+                tau = float(_np.clip(tau, -cap, cap))
                 kp, kd, pos, vel, _ = commands[name]
                 commands[name] = (kp, kd, pos, vel, tau)
 
