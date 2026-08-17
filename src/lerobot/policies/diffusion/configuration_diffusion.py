@@ -242,7 +242,13 @@ class DiffusionConfig(PreTrainedConfig):
     aug_mask_rect: tuple[float, float, float, float] | None = None
     aug_mask_cam_index: int | None = None   # which view gets the mask
     aug_mask_jitter: tuple[float, float] = (0.10, 0.10)   # +-frac of W, H
-    aug_mask_edge_jitter: float = 0.016     # extra +-frac per edge
+    aug_mask_edge_jitter: float = 0.016
+    # Fill value for the masked region. The aug runs AFTER mean/std
+    # normalization, so writing 0 means the ImageNet MEAN colour (mid-grey),
+    # NOT black — a ~2-sigma mismatch against a deploy path that blacks raw
+    # pixels (measured 2026-08-17). "black" writes (0 - mean)/std per channel
+    # so the model sees true black, matching a raw-black deploy mask.
+    aug_mask_fill: str = "zero"          # "zero" (legacy grey) | "black"     # extra +-frac per edge
 
     # Inference: reuse ONE sampling latent for the whole rollout (set on
     # reset(), reused every predict_action_chunk). Consecutive replans become

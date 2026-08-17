@@ -402,9 +402,18 @@ def _train_augment(imgs: Tensor, cfg) -> Tensor:
             e = (torch.rand(4) * 2 - 1) * cfg.aug_mask_edge_jitter
             x0 = int(max(0.0, x0b + jx + e[0]) * ww); y0 = int(max(0.0, y0b + jy + e[1]) * hh)
             x1 = int(min(1.0, x1b + jx + e[2]) * ww); y1 = int(min(1.0, y1b + jy + e[3]) * hh)
+            if getattr(cfg, "aug_mask_fill", "zero") == "black":
+                # normalized value of RAW BLACK, per channel: (0 - mean)/std
+                mean = torch.tensor([0.485, 0.456, 0.406], device=imgs.device, dtype=imgs.dtype)
+                std = torch.tensor([0.229, 0.224, 0.225], device=imgs.device, dtype=imgs.dtype)
+                fill = (-mean / std).view(-1, 1, 1)
+            else:
+                fill = torch.zeros(3, 1, 1, device=imgs.device, dtype=imgs.dtype)
             for ni in cams:
-                imgs[bi, :, ni, :, :y0, :] = 0; imgs[bi, :, ni, :, y1:, :] = 0
-                imgs[bi, :, ni, :, :, :x0] = 0; imgs[bi, :, ni, :, :, x1:] = 0
+                imgs[bi, :, ni, :, :y0, :] = fill
+                imgs[bi, :, ni, :, y1:, :] = fill
+                imgs[bi, :, ni, :, :, :x0] = fill
+                imgs[bi, :, ni, :, :, x1:] = fill
     if cfg.aug_noise_p > 0:
         sel = torch.rand(b, device=dev) < cfg.aug_noise_p
         idx = sel.nonzero(as_tuple=True)[0]
