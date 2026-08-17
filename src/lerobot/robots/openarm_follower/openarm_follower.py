@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import math
 import time
 from functools import cached_property
 from typing import Any
@@ -284,9 +285,13 @@ class OpenArmFollower(Robot):
         for motor in self.bus.motors:
             state = states.get(motor, {})
             obs_dict[f"{motor}.pos"] = state.get("position", 0.0)
-            # always cache velocity (rad/s) — the damping feedforward needs it
-            # even when it isn't exported into the observation dict
-            self._last_vel[motor] = float(state.get("velocity", 0.0))
+            # always cache velocity — the damping feedforward needs it even
+            # when it isn't exported into the observation dict.
+            # NOTE: the bus reports velocity in DEG/S (damiao.py returns
+            # np.degrees(velocity_rad_per_sec)); convert to rad/s here so
+            # damping_ff is genuinely N*m per rad/s. Getting this wrong makes
+            # the term 57x too large and saturates the torque cap (2026-08-17).
+            self._last_vel[motor] = math.radians(float(state.get("velocity", 0.0)))
             if self.config.use_velocity_and_torque:
                 obs_dict[f"{motor}.vel"] = state.get("velocity", 0.0)
                 obs_dict[f"{motor}.torque"] = state.get("torque", 0.0)
@@ -404,9 +409,12 @@ class OpenArmFollower(Robot):
                     tau += self.config.gravity_ff_scale * g["d"].qfrc_bias[g["dofadr"][i - 1]]
                 if damp_on:
                     b = damp[i - 1] if isinstance(damp, (list, tuple)) else damp
-                    # MEASURED joint speed (rad/s) from the last observation;
-                    # opposes motion => -b * qdot
-                    tau += -float(b) * self._last_vel.get(name, 0.0)
+                    # MEASURED joint speed, rad/s (converted in get_observation);
+                    # opposes motion => -b * qdot. Clamped on its OWN budget so a
+                    # bad gain can never hand the motor a full-cap brake.
+                    d_tau = -float(b) * self._last_vel.get(name, 0.0)
+                    dmax = float(getattr(self.config, "damping_ff_max_nm", 1.0))
+                    tau += max(-dmax, min(dmax, d_tau))
                 tau = float(_np.clip(tau, -cap, cap))
                 kp, kd, pos, vel, _ = commands[name]
                 commands[name] = (kp, kd, pos, vel, tau)

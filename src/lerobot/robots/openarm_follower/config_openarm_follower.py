@@ -122,6 +122,9 @@ class OpenArmFollowerConfigBase:
     # v_des = 0. Units: N*m per rad/s, per joint (list of 7) or scalar.
     # 0 = off. Clipped into the same per-motor torque cap as gravity.
     damping_ff: float | list[float] = 0.0
+    # Hard cap on the DAMPING contribution alone (N*m), independent of the
+    # gravity cap. Keeps a wrong gain from saturating the motor torque.
+    damping_ff_max_nm: float = 1.0
 
     # Values for joint limits. Can be overridden via CLI (for custom values) or by setting config.side to either 'left' or 'right'.
     # If config.side is left set to None and no CLI values are passed, the default joint limit values are small for safety.
