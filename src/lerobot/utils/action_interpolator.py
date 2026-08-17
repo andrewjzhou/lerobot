@@ -46,15 +46,27 @@ class ActionInterpolator:
             robot.send_action(action)
     """
 
-    def __init__(self, multiplier: int = 1):
+    def __init__(self, multiplier: int = 1, profile: str = "linear"):
         """Initialize the interpolator.
 
         Args:
-            multiplier: Control rate multiplier (1 = no interpolation, 2 = 2x, 3 = 3x, etc.)
+            multiplier: Control rate multiplier (1 = no interpolation, 2 = 2x, ...)
+            profile: shape of the ramp between consecutive policy rows.
+                "linear" — constant velocity inside each row interval, so
+                    velocity JUMPS at every row boundary (a jerk impulse at the
+                    policy rate; a source of visible shaking).
+                "smooth" — smoothstep 3t^2-2t^3: velocity starts and ends at
+                    ZERO on every row and peaks mid-interval ("0-N-0"), so the
+                    commanded velocity is continuous across row boundaries.
+                    Peak velocity is 1.5x the linear average for the same
+                    displacement, and the arm briefly rests at each row.
         """
         if multiplier < 1:
             raise ValueError(f"multiplier must be >= 1, got {multiplier}")
+        if profile not in ("linear", "smooth"):
+            raise ValueError(f"profile must be 'linear' or 'smooth', got {profile!r}")
         self.multiplier = multiplier
+        self.profile = profile
         self._prev: Tensor | None = None
         self._buffer: list[Tensor] = []
         self._idx = 0
@@ -91,6 +103,8 @@ class ActionInterpolator:
             self._buffer = []
             for i in range(1, self.multiplier + 1):
                 t = i / self.multiplier
+                if self.profile == "smooth":
+                    t = t * t * (3.0 - 2.0 * t)      # smoothstep: v(0)=v(1)=0
                 interp = self._prev + t * (action - self._prev)
                 self._buffer.append(interp)
         else:

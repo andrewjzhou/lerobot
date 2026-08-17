@@ -28,6 +28,7 @@ from lerobot.utils.feature_utils import build_dataset_frame
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import log_rerun_data
 
+from ..chunk_trace import get_tracer as get_chunk_tracer
 from ..inference import InferenceEngine
 
 if TYPE_CHECKING:
@@ -60,7 +61,9 @@ class RolloutStrategy(abc.ABC):
         Call this from ``setup()`` so strategies share identical
         initialisation without duplicating code.
         """
-        self._interpolator = ActionInterpolator(multiplier=ctx.runtime.cfg.interpolation_multiplier)
+        self._interpolator = ActionInterpolator(
+            multiplier=ctx.runtime.cfg.interpolation_multiplier,
+            profile=getattr(ctx.runtime.cfg, 'interpolation_profile', 'linear'))
         self._engine = ctx.policy.inference
         logger.info("Starting inference engine...")
         self._engine.reset()
@@ -343,14 +346,18 @@ def send_next_action(
     features = ctx.data.dataset_features
     ordered_keys = ctx.data.ordered_action_keys
 
+    new_waypoint = False
     if interpolator.needs_new_action():
         obs_frame = build_dataset_frame(features, obs_processed, prefix=OBS_STR)
         action_tensor = engine.get_action(obs_frame)
         if action_tensor is not None:
             interpolator.add(action_tensor.cpu())
+            new_waypoint = True
 
     interp = interpolator.get()
     if interp is None:
+        if (tracer := get_chunk_tracer()) is not None:
+            tracer.record_starved()
         return None
 
     if len(interp) != len(ordered_keys):
@@ -359,4 +366,15 @@ def send_next_action(
     action_dict = _apply_virtual_damping(action_dict, obs_raw, ctx)
     processed = ctx.processors.robot_action_processor((action_dict, obs_raw))
     ctx.hardware.robot_wrapper.send_action(processed)
+
+    if (tracer := get_chunk_tracer()) is not None:
+        if not tracer.meta:
+            tracer.meta = {"action_keys": list(ordered_keys),
+                           "fps": float(getattr(ctx.runtime.cfg, "fps", 30.0))}
+        queue = getattr(engine, "_action_queue", None)
+        tracer.record_exec(
+            action=action_dict,
+            meas={k: float(obs_raw[k]) for k in ordered_keys if k in obs_raw},
+            info=getattr(queue, "last_info", None) if queue is not None else None,
+            new_waypoint=new_waypoint)
     return action_dict

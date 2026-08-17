@@ -277,6 +277,12 @@ class RolloutConfig:
     fps: float = 30.0
     duration: float = 0.0  # 0 = infinite (24/7 mode)
     interpolation_multiplier: int = 1
+    # Ramp shape between policy rows: "linear" (constant velocity per row, so
+    # velocity jumps at every row boundary) or "smooth" (smoothstep, velocity
+    # 0 at each row and peaking mid-interval — the "0-N-0" profile). "smooth"
+    # removes the per-row jerk impulse at the cost of a 1.5x higher peak
+    # velocity for the same displacement.
+    interpolation_profile: str = "linear"
     # Virtual damper on the SENT command: q_send = q_cmd - c * (v_meas - v_cmd),
     # i.e. damping on the VELOCITY ERROR only — it opposes the arm overrunning
     # its setpoint without adding lag when tracking is already correct (a plain
