@@ -66,6 +66,23 @@ class InteractiveStrategy(BaseStrategy):
                              f"(available: {sorted(self._poses)})")
         self._side = getattr(ctx.runtime.cfg.robot, "side", None)
 
+        # Sampled-start bank: one extra number key after the named poses;
+        # each press draws a FRESH pre-IK'd joint pose from the bank.
+        self._bank = None
+        self._bank_name = ""
+        if getattr(cfg, "sample_pose_bank", ""):
+            bank = json.loads(Path(cfg.sample_pose_bank).read_text())
+            if not bank.get("entries"):
+                raise ValueError(f"{cfg.sample_pose_bank}: no entries")
+            if len(self._pose_names) + 1 > MAX_POSES:
+                raise ValueError("no number key left for the sample bank "
+                                 f"({len(self._pose_names)} poses already)")
+            self._bank = bank["entries"]
+            self._bank_name = bank.get("name", Path(cfg.sample_pose_bank).stem)
+            self._bank_rng = np.random.default_rng()   # fresh draw each press
+            logger.info("sampled-start bank '%s': %d poses on key %d",
+                        self._bank_name, len(self._bank), len(self._pose_names) + 1)
+
         from pynput import keyboard
 
         self._keys: deque[str] = deque()
@@ -106,10 +123,16 @@ class InteractiveStrategy(BaseStrategy):
             self._session_dir.mkdir(parents=True, exist_ok=True)
             logger.info("debug logs -> %s", self._session_dir)
         keymap = " | ".join(f"{i + 1}={n}" for i, n in enumerate(self._pose_names))
+        if self._bank is not None:
+            keymap += f" | {len(self._pose_names) + 1}={self._bank_name}(random)"
         quit_label = "q/ESC" if "q" in self.QUIT_KEYS else "ESC"
+        extras = ""
+        if getattr(cfg, "progress_stop_threshold", 0.0) > 0:
+            extras = (f" | auto-stop at progress >= "
+                      f"{cfg.progress_stop_threshold:.0%}")
         logger.info("Interactive strategy ready — %s | g=start inference | "
-                    "s=stop | o=open gripper %.0f%% | %s=quit",
-                    keymap, cfg.open_gripper_fraction * 100, quit_label)
+                    "s=stop | o=open gripper %.0f%% | %s=quit%s",
+                    keymap, cfg.open_gripper_fraction * 100, quit_label, extras)
 
     def run(self, ctx: RolloutContext) -> None:
         robot = ctx.hardware.robot_wrapper
@@ -121,6 +144,9 @@ class InteractiveStrategy(BaseStrategy):
             elif k and k.isdigit() and 1 <= (10 if k == "0" else int(k)) <= len(self._pose_names):
                 name = self._pose_names[(10 if k == "0" else int(k)) - 1]
                 self._goto_pose(robot, name)
+            elif (k and k.isdigit() and self._bank is not None
+                  and (10 if k == "0" else int(k)) == len(self._pose_names) + 1):
+                self._goto_sampled_pose(robot)
             elif k == "g":
                 self._run_inference(ctx)
             elif k == "o":
@@ -203,14 +229,38 @@ class InteractiveStrategy(BaseStrategy):
             logger.info("at pose '%s'", name)
         return aborted
 
+    def _goto_sampled_pose(self, robot) -> None:
+        """Draw a fresh pose from the sample bank and move there. The drawn
+        index goes into _last_pose so the run's meta.json records exactly
+        which start was used (good/bad starts stay attributable)."""
+        i = int(self._bank_rng.integers(len(self._bank)))
+        entry = self._bank[i]
+        tag = f"{self._bank_name}#{i}"
+        self._poses[tag] = {self._side or "right": entry["joints"]}
+        logger.info("sampled start %s: %s", tag,
+                    {k: round(v, 1) for k, v in entry["joints"].items()})
+        self._goto_pose(robot, tag)
+
     def _inference_duration(self, cfg) -> float:
         """Per-run cap in seconds; staged mode returns the active stage's."""
         return cfg.duration
 
     def _window_complete(self) -> bool:
-        """Hook polled every control tick: True ends the window with reason
-        'stage complete'. Staged auto-advance implements it off the
-        progress-head readout; here windows only end by key/duration."""
+        """Hook polled every control tick: True ends the window (reason from
+        _complete_reason). Staged auto-advance overrides this wholesale;
+        here it implements the progress-head auto-stop when
+        progress_stop_threshold is set."""
+        thr = getattr(self.config, "progress_stop_threshold", 0.0)
+        if thr <= 0:
+            return False
+        p = getattr(self._engine, "last_progress", None)
+        if p is None:                      # no progress head / no replan yet
+            return False
+        fraction = 1.0 + p                 # last_progress in [-1, 0]
+        if fraction >= thr:
+            self._complete_reason = (
+                f"progress {fraction:.0%} >= {thr:.0%} (readout {p:+.3f})")
+            return True
         return False
 
     def _run_inference(self, ctx: RolloutContext) -> str:
@@ -226,6 +276,7 @@ class InteractiveStrategy(BaseStrategy):
 
 
         self._keys.clear()
+        self._complete_reason = None
         engine.reset()
         engine.resume()
         self._cached_obs_processed = None
@@ -255,7 +306,7 @@ class InteractiveStrategy(BaseStrategy):
                 why = f"duration cap {duration:.0f}s"
                 break
             if self._window_complete():
-                why = "stage complete"
+                why = getattr(self, "_complete_reason", None) or "stage complete"
                 break
 
             obs = robot.get_observation()

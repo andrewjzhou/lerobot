@@ -84,6 +84,22 @@ class InteractiveStrategyConfig(RolloutStrategyConfig):
     # <log_dir>/<session>/runNN/ for offline diagnosis. Empty = off.
     log_dir: str = ""
     log_frame_stride: int = 3
+    # Progress-head auto-stop: end the inference window (exactly like the 's'
+    # key — engine pauses, robot holds) once the policy's progress readout
+    # says the task is >= this FRACTION complete, in [0, 1]. The engine's
+    # last_progress lives in [-1, 0] (-1 = start, 0 = done); fraction
+    # complete = 1 + last_progress, so 0.85 fires at last_progress >= -0.15.
+    # Fires on the FIRST crossing — a single replan-noise spike can
+    # early-stop the run. 0 = off. Policies without a progress head never
+    # publish a readout, so this is inert for them.
+    progress_stop_threshold: float = 0.0
+    # Sampled-start bank: path to a JSON of pre-IK'd joint poses
+    # ({"entries": [{"joints": {...}}, ...]}). When set, ONE extra number key
+    # is registered after `poses`; each press draws a FRESH random entry and
+    # moves there — for probing whether a different in-distribution start
+    # pose succeeds where the fixed one fails. The drawn index is logged and
+    # stamped into the run's meta.json (start_pose: "<bankname>#<idx>").
+    sample_pose_bank: str = ""
 
 
 @RolloutStrategyConfig.register_subclass("staged")
