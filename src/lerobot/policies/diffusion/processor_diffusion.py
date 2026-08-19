@@ -31,6 +31,7 @@ from lerobot.processor import (
     policy_action_to_transition,
     transition_to_policy_action,
 )
+from lerobot.configs.types import FeatureType, NormalizationMode
 from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
 
 from .configuration_diffusion import DiffusionConfig
@@ -82,18 +83,30 @@ def make_diffusion_pre_post_processors(
     # model applies its own se3_pos_scale instead.
     norm_features = {**config.input_features, **config.output_features}
     unnorm_features = dict(config.output_features)
+    norm_map = dict(config.normalization_mapping)
     if config.use_se3_relative:
         norm_features = {
             k: v for k, v in norm_features.items() if k not in ("observation.state", "action")
         }
         unnorm_features = {k: v for k, v in unnorm_features.items() if k != "action"}
+        # Dropping "action" from `features` is NOT sufficient. NormalizerProcessorStep
+        # normalizes observations from the features dict, but runs the ACTION path
+        # unconditionally (_normalize_action; normalize_processor.py:488 and :549),
+        # and that path never consults `features`. So the ABSOLUTE action kept being
+        # MIN_MAX-scaled in both directions, corrupting rot6d before the model ever
+        # relativized it (2.89 deg median round-trip error, measured 2026-08-18).
+        # IDENTITY is the documented passthrough — _apply_transform returns the
+        # tensor untouched — and it is honoured by the normalizer and unnormalizer
+        # alike, so training and inference stay symmetric.
+        if config.se3_normalize_pos_only:
+            norm_map[FeatureType.ACTION] = NormalizationMode.IDENTITY
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(
             features=norm_features,
-            norm_map=config.normalization_mapping,
+            norm_map=norm_map,
             stats=dataset_stats,
         ),
         relative_step,
@@ -103,7 +116,7 @@ def make_diffusion_pre_post_processors(
             enabled=config.use_relative_actions, relative_step=relative_step
         ),
         UnnormalizerProcessorStep(
-            features=unnorm_features, norm_map=config.normalization_mapping, stats=dataset_stats
+            features=unnorm_features, norm_map=norm_map, stats=dataset_stats
         ),
         DeviceProcessorStep(device="cpu"),
     ]

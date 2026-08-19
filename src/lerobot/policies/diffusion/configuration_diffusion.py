@@ -161,6 +161,25 @@ class DiffusionConfig(PreTrainedConfig):
     # the diffusion space exactly like original diffusion_policy/UMI, so
     # x0 clipping (`clip_sample`) is valid again in SE(3) mode.
     use_se3_normalize: bool = False
+    # UMI-FAITHFUL normalization (2026-08-18). When True, the ONLY scaling
+    # applied to poses is a MIN_MAX on the RELATIVIZED POSITION (dims 0:3);
+    # rot6d is passed through untouched everywhere, and the ABSOLUTE action is
+    # not normalized at all. Matches the original repo, which range-normalizes
+    # position + gripper but uses an IDENTITY normalizer for rotation
+    # (diffusion_policy/dataset/umi_dataset.py get_normalizer).
+    #
+    # WHY THIS EXISTS: with it False (the pre-2026-08-18 behaviour) the ABSOLUTE
+    # action is MIN_MAX-normalized by the processor before the model relativizes
+    # it. Per-dim affine scaling destroys rot6d — components reach ~8 where a
+    # rotation column caps at 1 — and the Gram-Schmidt inside pose9_to_mat then
+    # silently projects that back onto SO(3), which is NOT invertible. Measured
+    # end-to-end round-trip error of the action targets: position 0.0000 mm but
+    # rotation 2.89 deg median / 8.76 deg max. Observation.state was always
+    # exempt, so the two were relativized in mismatched spaces.
+    #
+    # Kept default False so every checkpoint trained before this date keeps
+    # loading and evaluating exactly as it was trained.
+    se3_normalize_pos_only: bool = False
     # --- train-time low-pass on the ACTION TARGETS (zero-phase FIR) ---
     # Teaches the policy to emit smooth trajectories natively, instead of
     # filtering at deploy (which would add phase lag). Applied in WORLD space

@@ -137,11 +137,19 @@ class DiffusionPolicy(PreTrainedPolicy):
 
     def _se3_normalize(self, x: Tensor, key: str) -> Tensor:
         lo, hi = self._se3_stats(key, x)
-        return 2.0 * (x - lo) / (hi - lo).clamp(min=1e-6) - 1.0
+        out = 2.0 * (x - lo) / (hi - lo).clamp(min=1e-6) - 1.0
+        if self.config.se3_normalize_pos_only:
+            # rot6d columns are already bounded to [-1, 1] by construction, so
+            # scaling them buys nothing and breaks the rotation algebra.
+            return torch.cat([out[..., :3], x[..., 3:]], dim=-1)
+        return out
 
     def _se3_unnormalize(self, x: Tensor, key: str) -> Tensor:
         lo, hi = self._se3_stats(key, x)
-        return (x + 1.0) / 2.0 * (hi - lo).clamp(min=1e-6) + lo
+        out = (x + 1.0) / 2.0 * (hi - lo).clamp(min=1e-6) + lo
+        if self.config.se3_normalize_pos_only:
+            return torch.cat([out[..., :3], x[..., 3:]], dim=-1)
+        return out
 
     def _action_lpf(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         """Zero-phase low-pass the padded action window, then crop to horizon.
