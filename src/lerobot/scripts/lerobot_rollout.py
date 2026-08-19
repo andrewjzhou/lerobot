@@ -228,6 +228,10 @@ def rollout(cfg: RolloutConfig):
         logger.info("Interrupted by user")
     finally:
         strategy.teardown(ctx)
+        from lerobot.rollout.chunk_trace import get_tracer as _get_chunk_tracer
+
+        if (_tr := _get_chunk_tracer()) is not None:
+            _tr.dump()
 
     logger.info("Rollout finished")
 
