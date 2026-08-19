@@ -446,6 +446,11 @@ class RTCInferenceEngine(InferenceEngine):
         with self._obs_lock:
             self._obs_history.clear()
             self._obs_times.clear()
+            # A stale obs surviving reset let the RTC thread replan against an
+            # EMPTY history window on the next run ("list index out of range"
+            # at resume, then a 2 s error-retry hole at window start). The
+            # thread must idle until the new run's first notify_observation.
+            self._obs_holder.pop("obs", None)
 
     # ------------------------------------------------------------------
     # Action production (called from main thread)
@@ -547,6 +552,9 @@ class RTCInferenceEngine(InferenceEngine):
                             with self._obs_lock:
                                 window = list(self._obs_history)
                                 window_times = list(self._obs_times)
+                            if not window:      # no obs yet this run — idle, don't error
+                                time.sleep(_RTC_IDLE_SLEEP_S)
+                                continue
                             while len(window) < self._n_obs_steps:
                                 window.insert(0, window[0])
                             frames = []
@@ -623,18 +631,23 @@ class RTCInferenceEngine(InferenceEngine):
                         # The head trains on MIN_MAX-normalized targets whose
                         # stats are exactly min=-1/max=0 by construction, so
                         # norm = 2x + 1 and the inverse is fixed: x=(norm-1)/2.
-                        p_norm = getattr(
-                            getattr(self._policy, "diffusion", self._policy),
-                            "_last_progress_norm", None)
+                        #
+                        # Read it from the model that actually RAN: with
+                        # use_ema the eval path is _inference_model (the EMA
+                        # copy), and generate_actions stashes the readout on
+                        # `self` there — reading .diffusion (the live model)
+                        # returns None forever. That mismatch silently killed
+                        # the progress print AND last_progress for every EMA
+                        # policy from 2026-08-12 until today (2026-08-19).
+                        ran = (getattr(self._policy, "_inference_model", None)
+                               or getattr(self._policy, "diffusion", self._policy))
+                        p_norm = getattr(ran, "_last_progress_norm", None)
                         if p_norm is not None:
                             self.last_progress = (p_norm - 1.0) / 2.0
-                            # console readout throttled to ~1/s (replans can
-                            # be every ~0.5 s; don't spam the terminal)
-                            now_p = time.perf_counter()
-                            if now_p - getattr(self, "_progress_printed_t", 0.0) >= 1.0:
-                                self._progress_printed_t = now_p
-                                print(f"[progress] {self.last_progress:+.3f}  "
-                                      "(-1 = start, 0 = task complete)", flush=True)
+                            # one line per replan (Andrew 2026-08-19)
+                            print(f"[progress] {self.last_progress:+.3f}  "
+                                  f"({1.0 + self.last_progress:.0%} complete; "
+                                  "-1 = start, 0 = done)", flush=True)
 
                         original = actions.squeeze(0).clone()
                         processed = self._postprocessor(actions).squeeze(0)
@@ -670,10 +683,9 @@ class RTCInferenceEngine(InferenceEngine):
                                 delay_ticks=new_delay + self._rtc_config.execution_latency_ticks,
                                 idx_before=idx_before, policy_actions=policy_abs)
 
-                        # throttled background viz (no control-loop impact)
-                        uv_n = getattr(
-                            getattr(self._policy, "diffusion", self._policy),
-                            "_last_pixel_norm", None)
+                        # throttled background viz (no control-loop impact);
+                        # same ran-model resolution as the progress readout
+                        uv_n = getattr(ran, "_last_pixel_norm", None)
                         self._viz.maybe_submit(viz_head if self._n_obs_steps > 1 else None,
                                                uv_n, self._uv_stats, self.last_progress)
                         if self._n_obs_steps > 1:
