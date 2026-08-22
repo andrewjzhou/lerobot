@@ -50,6 +50,21 @@ from .base import InferenceEngine
 logger = logging.getLogger(__name__)
 
 
+
+def _swap_command_frame(obs: dict, cmd: dict | None) -> dict:
+    """Shallow-copy ``obs`` with joint values replaced by the last commanded
+    targets. No-op (same dict back) when there is no command yet — at window
+    start the arm is at rest and cmd == meas anyway. Camera arrays are shared
+    by reference; only scalar joint entries are replaced."""
+    if not cmd:
+        return obs
+    swapped = dict(obs)
+    for k, v in cmd.items():
+        if k in swapped:
+            swapped[k] = v
+    return swapped
+
+
 class _RolloutViz:
     """Throttled background saver of the policy's-eye head view + pixel-head
     marker. Runs entirely off the control loop: images are copied in the RTC
@@ -443,6 +458,9 @@ class RTCInferenceEngine(InferenceEngine):
             self._action_adapter.reset()
         if self._action_queue is not None:
             self._action_queue.clear()
+        # stale commands from a previous window (or from before a pose move)
+        # must never anchor the next window's first observations
+        self.last_sent_action = None
         with self._obs_lock:
             self._obs_history.clear()
             self._obs_times.clear()
@@ -463,7 +481,20 @@ class RTCInferenceEngine(InferenceEngine):
         return self._action_queue.get()
 
     def notify_observation(self, obs: dict) -> None:
-        """Publish the latest observation for the RTC thread to consume."""
+        """Publish the latest observation for the RTC thread to consume.
+
+        With RTCConfig.anchor_on_command, the joint values the POLICY sees
+        are the last COMMANDED targets, not the measured ones: plans are
+        se3-anchored on this state, and the queue splices in command space —
+        anchoring on the (lagging) measurement injected a backward step of
+        speed x ~1 tick at every splice (10-20 mm at this task's 166-308
+        mm/s; 2026-08-22). Training data (hand-held UMI rig) has cmd == meas,
+        so the command frame is the training-time meaning of the state
+        channel. Logging/tracing/safety paths keep the true measurement —
+        only the inference copy is swapped."""
+        if (self._rtc_config is not None
+                and getattr(self._rtc_config, "anchor_on_command", False)):
+            obs = _swap_command_frame(obs, getattr(self, "last_sent_action", None))
         with self._obs_lock:
             self._obs_holder["obs"] = obs
             self._obs_history.append(obs)
@@ -664,6 +695,17 @@ class RTCInferenceEngine(InferenceEngine):
 
                         inference_count += 1
                         consecutive_errors = 0
+                        # STARVATION SAFEGUARD: if a replan costs as many ticks
+                        # as the queue holds at trigger time, the queue can run
+                        # dry mid-inference (robot holds = visible hitch).
+                        # Relevant when guidance/extra steps grow the latency.
+                        if (new_delay >= self._rtc_queue_threshold
+                                and time.perf_counter() - getattr(self, "_starve_warn_t", 0.0) > 5.0):
+                            self._starve_warn_t = time.perf_counter()
+                            logger.warning(
+                                "replan took %d ticks >= queue_threshold %d - starvation "
+                                "risk (raise threshold, lower DDIM steps, or disable "
+                                "rtc guidance)", new_delay, self._rtc_queue_threshold)
                         is_warmup = inference_count <= warmup_required
                         if is_warmup:
                             latency_tracker.reset()
@@ -675,6 +717,22 @@ class RTCInferenceEngine(InferenceEngine):
                             new_delay + self._rtc_config.execution_latency_ticks,
                             idx_before, policy_actions=policy_abs,
                             birth_t=current_time)
+
+                        if queue.qsize() == 0:
+                            # Anti-spiral backoff. A merge that yields ZERO
+                            # servable rows means the whole chunk went stale
+                            # during inference; replanning back-to-back at
+                            # 100% duty only inflates the next latency further
+                            # (contention + laptop-GPU thermals: observed
+                            # 0.35s -> 2.4s lock-in, 2026-08-20). Yield
+                            # briefly so the next inference runs at normal
+                            # speed and its chunk actually serves rows.
+                            logger.warning(
+                                "merge yielded 0 servable rows (delay %d >= "
+                                "chunk) - backing off %.0f ms before replan",
+                                new_delay + self._rtc_config.execution_latency_ticks,
+                                1000 * 3 * time_per_chunk)
+                            time.sleep(3 * time_per_chunk)
 
                         if (_tracer := get_chunk_tracer()) is not None:
                             _tracer.record_chunk(

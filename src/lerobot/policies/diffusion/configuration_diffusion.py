@@ -180,6 +180,25 @@ class DiffusionConfig(PreTrainedConfig):
     # Kept default False so every checkpoint trained before this date keeps
     # loading and evaluating exactly as it was trained.
     se3_normalize_pos_only: bool = False
+    # Real-Time Chunking prefix guidance at INFERENCE (Black et al., ported to
+    # the epsilon/DDIM parametrization; see RTCProcessor.guide_x0). When True,
+    # predict_action_chunk consumes the engine-provided prev_chunk_left_over:
+    # each DDIM step nudges the clean-chunk estimate toward the previous
+    # chunk's leftover, weighted by the prefix schedule (frozen executing rows
+    # -> 1, ramp across execution_horizon, 0 beyond). Consecutive chunks then
+    # agree by construction and splice_mode "none" is the natural pairing.
+    # Requires use_se3_relative (the prefix is re-relativized to the current
+    # anchor). Costs no extra denoiser calls (~elementwise ops per step).
+    # Read per replan -> live-togglable. Knobs (execution_horizon,
+    # max_guidance_weight, prefix_attention_schedule) come from rtc_config,
+    # which the rollout stack aliases onto this config at deploy.
+    rtc_guidance: bool = False
+    # True (default): the correction is the reference implementation's true
+    # vector-Jacobian product back through the denoiser (Jacobian-filtered,
+    # stays on the learned action manifold; ~2x per-step cost while guided).
+    # False: the identity-VJP shortcut (raw weighted x0 error, s clamped to
+    # 1) — cheap, but carved off-manifold seam cliffs live on 2026-08-22.
+    rtc_guidance_vjp: bool = True
     # --- train-time low-pass on the ACTION TARGETS (zero-phase FIR) ---
     # Teaches the policy to emit smooth trajectories natively, instead of
     # filtering at deploy (which would add phase lag). Applied in WORLD space

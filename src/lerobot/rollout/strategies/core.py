@@ -366,6 +366,9 @@ def send_next_action(
     action_dict = _apply_virtual_damping(action_dict, obs_raw, ctx)
     processed = ctx.processors.robot_action_processor((action_dict, obs_raw))
     ctx.hardware.robot_wrapper.send_action(processed)
+    # command-frame anchoring support: the engine may swap these values into
+    # the observations it feeds the policy (see RTCConfig.anchor_on_command)
+    engine.last_sent_action = action_dict
 
     if (tracer := get_chunk_tracer()) is not None:
         if not tracer.meta:

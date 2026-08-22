@@ -255,17 +255,39 @@ class ActionQueue:
                              if policy_actions is not None else None)
 
         blend = self.cfg.splice_blend_steps
+        mode = getattr(self.cfg, "splice_mode", "blend")
         if blend > 0 and self.queue is None and self.seed_action is not None:
             # First chunk of a run: blend out of the robot's held pose (the
             # chunk may start noticeably away from it — warmup latency drops
-            # its first actions). Processed space only.
+            # its first actions). Processed space only. Applies to every
+            # splice_mode: there is no previous plan yet, only a held pose.
             n = min(blend, len(new_processed))
             seed = self.seed_action.to(new_processed.dtype)
             for i in range(n):
                 a = (i + 1) / (n + 1)
                 new_processed[i] = (1 - a) * seed + a * new_processed[i]
             self.seed_action = None
-        elif blend > 0 and self.queue is not None:
+        elif blend > 0 and mode == "replace" and self.queue is not None:
+            # UMI-style splice (Chi et al., eval_real_umi + schedule_waypoint):
+            # the old plan's future is dropped wholesale; the served stream
+            # ramps from the LAST SERVED COMMAND (a single point) onto the new
+            # plan over `blend` rows. Never mixes two plans — on a mode flip
+            # this commits to the new mode immediately via a bounded ramp,
+            # instead of executing an average that belongs to neither plan.
+            # original/policy streams stay untouched (they must remain the
+            # policy's actual plan for RTC prefix use).
+            anchor = None
+            if self.last_index > 0:
+                anchor = self.queue[self.last_index - 1]
+            elif len(self.queue) > 0:
+                anchor = self.queue[0]
+            if anchor is not None:
+                n = min(blend, len(new_processed))
+                anchor = anchor.to(new_processed.dtype)
+                for i in range(n):
+                    a = (i + 1) / (n + 1)
+                    new_processed[i] = (1 - a) * anchor + a * new_processed[i]
+        elif blend > 0 and mode == "blend" and self.queue is not None:
             # Cross-fade from the old chunk's remaining (time-aligned) actions
             # into the new chunk so a trajectory-mode switch cannot produce a
             # step discontinuity in the served command stream.
@@ -292,6 +314,7 @@ class ActionQueue:
                     new_processed[i] = (1 - a) * src.to(new_processed.dtype) + a * new_processed[i]
                     if i < len(old_original):
                         new_original[i] = (1 - a) * old_original[i].to(new_original.dtype) + a * new_original[i]
+        # mode == "none": hard switch — new chunk served exactly as generated
 
         self.original_queue = new_original
         self.queue = new_processed

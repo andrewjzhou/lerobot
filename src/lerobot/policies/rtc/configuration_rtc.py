@@ -45,16 +45,46 @@ class RTCConfig:
     # train/deploy timing term not matched by construction. 0 = off.
     execution_latency_ticks: int = 0
 
+    # Anchor inference on the COMMANDED pose instead of the measured one:
+    # the engine swaps the last sent joint targets into the observation it
+    # feeds the policy (2026-08-22). WHY: plans are se3-anchored on the obs
+    # state but the queue splices in command space; during motion the two
+    # frames differ by speed x ~1 tick (measured 10-20 mm at 166-308 mm/s),
+    # injected as a backward step at every splice. Training (hand-held UMI
+    # rig) had cmd == meas, so the command frame IS the training-time
+    # meaning of the state channel. DELIBERATE TRADEOFF (Andrew, 2026-08-22):
+    # the policy becomes blind to cmd/meas divergence — a stalled or
+    # obstructed arm looks like perfect tracking. Revisit for contact tasks.
+    anchor_on_command: bool = False
+
     # Core RTC settings
-    # Todo change to exp
-    prefix_attention_schedule: RTCAttentionSchedule = RTCAttentionSchedule.LINEAR
-    max_guidance_weight: float = 10.0
+    # EXP = the RTC paper's schedule (weights sag exponentially right after
+    # the frozen region); was LINEAR until 2026-08-22.
+    prefix_attention_schedule: RTCAttentionSchedule = RTCAttentionSchedule.EXP
+    # 5.0 = the reference implementation's eval default
+    # (real-time-chunking-kinetix RealtimeMethodConfig); was 10.0 until
+    # 2026-08-22.
+    max_guidance_weight: float = 5.0
     execution_horizon: int = 10
     # Cross-fade this many steps from the old chunk's remaining actions into
     # each replacement chunk (0 = hard switch). For policies without
     # prefix-inpainting support (e.g. diffusion), this bounds the command
     # discontinuity when consecutive chunks pick different trajectory modes.
     splice_blend_steps: int = 0
+    # HOW consecutive chunks are joined at a merge (read per merge -> live):
+    #   "blend"   PLAN-TO-PLAN cross-fade: the first splice_blend_steps served
+    #             rows mix the old chunk's remaining rows with the new chunk's
+    #             (ACT-temporal-ensemble-flavoured). On a mode flip the mix is
+    #             a trajectory belonging to NEITHER plan.
+    #   "replace" UMI-style (Chi et al. eval_real): the old plan's future is
+    #             DISCARDED; the first splice_blend_steps rows ramp from the
+    #             LAST SERVED COMMAND (a point, not a plan) onto the new plan.
+    #             Commits to the new mode immediately; worst case is a bounded
+    #             ramp, never an average of two modes.
+    #   "none"    hard switch: new chunk served as-is (raw receding horizon;
+    #             also the right setting when the POLICY already guarantees
+    #             continuity, e.g. RTC prefix guidance).
+    splice_mode: str = "blend"
 
     # Debug settings
     debug: bool = False
@@ -66,3 +96,5 @@ class RTCConfig:
             raise ValueError(f"max_guidance_weight must be positive, got {self.max_guidance_weight}")
         if self.debug_maxlen <= 0:
             raise ValueError(f"debug_maxlen must be positive, got {self.debug_maxlen}")
+        if self.splice_mode not in ("blend", "replace", "none"):
+            raise ValueError(f"splice_mode must be blend|replace|none, got {self.splice_mode!r}")

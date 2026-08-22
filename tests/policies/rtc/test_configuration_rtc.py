@@ -27,8 +27,8 @@ def test_rtc_config_default_initialization():
     config = RTCConfig()
 
     assert config.enabled is True
-    assert config.prefix_attention_schedule == RTCAttentionSchedule.LINEAR
-    assert config.max_guidance_weight == 10.0
+    assert config.prefix_attention_schedule == RTCAttentionSchedule.EXP
+    assert config.max_guidance_weight == 5.0
     assert config.execution_horizon == 10
     assert config.debug is False
     assert config.debug_maxlen == 100
@@ -60,6 +60,6 @@ def test_rtc_config_partial_initialization():
     assert config.enabled is True
     assert config.max_guidance_weight == 15.0
     # Other values should be defaults
-    assert config.prefix_attention_schedule == RTCAttentionSchedule.LINEAR
+    assert config.prefix_attention_schedule == RTCAttentionSchedule.EXP
     assert config.execution_horizon == 10
     assert config.debug is False

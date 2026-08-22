@@ -248,6 +248,86 @@ class RTCProcessor:
 
         return result
 
+    def guide_x0(self, x0_pred, prefix_target, inference_delay, tau,
+                 execution_horizon=None, row_offset=0):
+        """x0-parametrization RTC guidance for DDPM/DDIM samplers.
+
+        The flow-matching `denoise_step` above adjusts the VELOCITY; for an
+        epsilon-prediction sampler the equivalent operation is a per-step nudge
+        of the clean-chunk estimate x0 toward the frozen prefix:
+
+            x0' = x0 + s(tau) * W  *  (prefix_target - x0)
+
+        with W = get_prefix_weights(inference_delay, execution_horizon, T)
+        (ones over the already-executing prefix, a ramp across the execution
+        horizon, zeros beyond) and s(tau) the same clamped guidance schedule as
+        the velocity form, additionally clamped to <= 1: in x0-space s = 1 IS
+        the exact projection onto the target (RePaint-style inpainting), so
+        values above 1 would overshoot rather than converge faster. Because
+        v_t was computed detached in `denoise_step`, its autograd correction
+        reduces to the identity-VJP (correction == weighted error); this
+        method makes that explicit and costs a few elementwise ops - no extra
+        denoiser call, no autograd.
+
+        Args:
+            x0_pred: (B, T, A) clean-sample estimate at the current step.
+            prefix_target: (B, T, A) previous chunk's leftover, already in the
+                model's x-space, row-aligned (row 0 = the anchor tick) and
+                right-padded to T.
+            inference_delay: rows that WILL execute during this inference -
+                weighted 1.0 (frozen).
+            tau: signal fraction in [0, 1] (DDIM: sqrt(alpha_bar_t); 0 = pure
+                noise, 1 = clean) - matches the flow-time convention above.
+            execution_horizon: ramp end; defaults to config.
+
+        Returns:
+            Guided x0 with the same shape.
+        """
+        if prefix_target is None:
+            return x0_pred
+        if execution_horizon is None:
+            execution_horizon = self.rtc_config.execution_horizon
+        total = x0_pred.shape[1]
+        # row_offset: leading horizon rows that predate the anchor tick (the
+        # diffusion policy's horizon starts n_obs-1 rows in the PAST; served
+        # actions begin at row n_obs-1). They get weight 0 - there is no
+        # committed prefix for the past.
+        weights = self.prefix_weight_vector(
+            inference_delay, execution_horizon, total, row_offset,
+            device=x0_pred.device, dtype=x0_pred.dtype)
+        s = self.pinv_guidance_weight(tau, device=x0_pred.device,
+                                      dtype=x0_pred.dtype)
+        s = torch.clamp(s, max=1.0)          # x0-space: 1.0 = exact projection
+
+        return x0_pred + s * weights * (prefix_target - x0_pred)
+
+    def prefix_weight_vector(self, inference_delay, execution_horizon, total,
+                             row_offset=0, *, device, dtype):
+        """Per-row soft-mask weights aligned to the model horizon: zeros over
+        the `row_offset` past rows, then get_prefix_weights over the rest,
+        with the frozen span and ramp end clamped to the effective length.
+        Shared by the identity (guide_x0) and true-VJP guidance paths."""
+        eff = total - int(row_offset)
+        execution_horizon = min(int(execution_horizon), eff)
+        inference_delay = max(0, min(int(inference_delay), eff))
+        core = self.get_prefix_weights(inference_delay, execution_horizon, eff)
+        weights = torch.cat([torch.zeros(int(row_offset)), core])
+        return weights.to(device=device, dtype=dtype).view(1, total, 1)
+
+    def pinv_guidance_weight(self, tau, *, device, dtype):
+        """Black et al. guidance weight min(c * inv_r2, max_guidance_weight)
+        at signal fraction tau (flow time; DDIM: sqrt(alpha_bar)). NOT
+        clamped to 1 — the reference applies it to a Jacobian-filtered
+        (VJP) correction, which contracts the error; callers using the raw
+        identity correction must clamp themselves."""
+        max_w = torch.as_tensor(self.rtc_config.max_guidance_weight,
+                                dtype=dtype, device=device)
+        tau_t = torch.as_tensor(tau, dtype=dtype, device=device)
+        one_minus = (1 - tau_t) ** 2
+        inv_r2 = (one_minus + tau_t**2) / one_minus.clamp(min=1e-8)
+        c = torch.nan_to_num((1 - tau_t) / tau_t.clamp(min=1e-8), posinf=max_w)
+        return torch.minimum(torch.nan_to_num(c * inv_r2, posinf=max_w), max_w)
+
     def get_prefix_weights(self, start, end, total):
         start = min(start, end)
 

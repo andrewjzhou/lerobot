@@ -461,7 +461,10 @@ def test_denoise_step_adds_batch_dimension():
 
 def test_denoise_step_uses_custom_execution_horizon():
     """Test denoise_step uses custom execution_horizon parameter."""
-    config = RTCConfig(execution_horizon=10)
+    # pin LINEAR: the expected values below are hand-computed linear-ramp
+    # weights (the default schedule is EXP since 2026-08-22)
+    config = RTCConfig(execution_horizon=10,
+                       prefix_attention_schedule=RTCAttentionSchedule.LINEAR)
     processor = RTCProcessor(config)
 
     x_t = torch.ones(1, 20, 1)

@@ -250,9 +250,11 @@ class DiffusionPolicy(PreTrainedPolicy):
                              **kwargs) -> Tensor:
         """Predict a chunk of actions given environment observations.
 
-        ``**kwargs`` absorbs the async/RTC engine interface (``inference_delay``,
-        ``prev_chunk_left_over``) — unused here: chunks are generated fresh and
-        the engine's append-mode ActionQueue provides continuity.
+        ``**kwargs`` carries the async/RTC engine interface (``inference_delay``,
+        ``prev_chunk_left_over``). With ``config.rtc_guidance`` those drive
+        prefix-guided sampling (Real-Time Chunking ported to DDIM — see
+        _build_rtc_guidance); otherwise chunks are generated fresh and the
+        engine's ActionQueue splice provides continuity.
 
         Supports two modes:
         - Online (queues populated via select_action): stacks observations from internal queues.
@@ -277,10 +279,93 @@ class DiffusionPolicy(PreTrainedPolicy):
             noise = self._frozen_noise
         if self.config.use_se3_relative:
             batch = self._se3_relativize_batch(batch)
-        actions = self._inference_model.generate_actions(batch, noise=noise)
+        guidance = None
+        if (getattr(self.config, "rtc_guidance", False)
+                and self.config.use_se3_relative
+                and kwargs.get("prev_chunk_left_over") is not None):
+            guidance = self._build_rtc_guidance(
+                kwargs["prev_chunk_left_over"], int(kwargs.get("inference_delay", 0) or 0))
+        actions = self._inference_model.generate_actions(batch, noise=noise,
+                                                         guidance=guidance)
         if self.config.use_se3_relative:
             actions = self._se3_derelativize_actions(actions)
         return actions
+
+    def _build_rtc_guidance(self, prev_abs: Tensor, inference_delay: int):
+        """Map the engine's leftover chunk (ABSOLUTE 9D poses) into the
+        model's x-space and align it to the horizon for RTC prefix guidance.
+
+        Alignment: the engine's leftover row 0 is the action for the CURRENT
+        (anchor) tick; the diffusion horizon's row 0 is n_obs-1 ticks in the
+        PAST — served actions start at horizon row n_obs-1. The target is
+        therefore placed at row_offset = n_obs-1, and guide_x0 zero-weights
+        the past rows.
+        """
+        try:
+            from lerobot.policies.rtc.configuration_rtc import RTCConfig
+            from lerobot.policies.rtc.modeling_rtc import RTCProcessor
+
+            proc = getattr(self, "_rtc_proc", None)
+            cfg = getattr(self.config, "rtc_config", None)
+            if proc is None or (cfg is not None and proc.rtc_config is not cfg):
+                proc = RTCProcessor(cfg if cfg is not None else RTCConfig())
+                self._rtc_proc = proc
+
+            anchor = self._se3_anchor            # stashed by _se3_relativize_batch
+            dev, dt = anchor.device, anchor.dtype
+            prev = prev_abs.detach().to(device=dev, dtype=dt)
+            if prev.ndim == 2:
+                prev = prev.unsqueeze(0)
+            rel = relativize_window(prev, anchor)
+            if self.config.use_se3_normalize:
+                rel = self._se3_normalize(rel, "action")
+            else:
+                rel = rel.clone()
+                rel[..., :3] /= self.config.se3_pos_scale
+
+            offset = self.config.n_obs_steps - 1
+            horizon = self.config.horizon
+            n = min(rel.shape[1], horizon - offset)
+            if n <= 0:
+                # Starved queue: no leftover to be consistent with. Guiding
+                # toward the zero-padded target would pin rows to zero
+                # position AND a degenerate all-zero rot6d — Gram-Schmidt
+                # turns those into garbage poses that the deploy adapter
+                # rejects into HOLD rows (2026-08-20: arm froze mid-task and
+                # the replan loop spiraled).
+                return None
+            if int(inference_delay) >= n:
+                # Method precondition violated: every committed (leftover)
+                # row falls inside the inference delay, i.e. it will already
+                # be executed AND discarded by the time this chunk serves.
+                # There is no committed row at or beyond the serve point to
+                # be consistent with — guidance is vacuous for the served
+                # rows and only conditions the model on a stale prefix.
+                # Skip rather than fudge (2026-08-20: delay 10 vs leftover 8
+                # produced a violent hard-switch swing). The fix is upstream:
+                # keep delay < leftover, e.g. DDIM 8.
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    "rtc_guidance skipped: delay %d >= leftover %d",
+                    int(inference_delay), n)
+                return None
+            target = torch.zeros(1, horizon, rel.shape[-1], device=dev, dtype=dt)
+            target[:, offset:offset + n] = rel[:, :n]
+            # Weights must never extend past the REAL leftover: rows beyond n
+            # are zero-padding, not commitments. Within it, the paper's own
+            # soft mask provides the transition: frozen to the true delay,
+            # natural ramp out to the execution horizon.
+            exec_eff = min(int(proc.rtc_config.execution_horizon), n)
+            # resolve the vjp flag HERE, on the live policy config: the
+            # sampler runs on the EMA copy whose config is a deepcopy, so
+            # live toggles would never reach a getattr inside the sampler
+            use_vjp = bool(getattr(self.config, "rtc_guidance_vjp", True))
+            return (target, int(inference_delay), proc, offset, exec_eff, use_vjp)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "rtc_guidance disabled for this replan (prefix transform failed)")
+            return None
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
@@ -546,6 +631,7 @@ class DiffusionModel(nn.Module):
         global_cond: Tensor | None = None,
         generator: torch.Generator | None = None,
         noise: Tensor | None = None,
+        guidance: tuple | None = None,
     ) -> Tensor:
         device = get_device_from_parameters(self)
         dtype = get_dtype_from_parameters(self)
@@ -564,13 +650,57 @@ class DiffusionModel(nn.Module):
 
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
 
+        guide = guidance is not None and self.config.prediction_type == "epsilon"
+        use_vjp = False
+        if guide:
+            prefix_target, delay, processor, row_offset, exec_eff, use_vjp = guidance
+            abars = self.noise_scheduler.alphas_cumprod.to(sample.device)
+
         for t in self.noise_scheduler.timesteps:
+            t_full = torch.full(sample.shape[:1], t, dtype=torch.long,
+                                device=sample.device)
+            if use_vjp:
+                # RTC prefix guidance, faithful port of the reference
+                # (Physical-Intelligence/real-time-chunking-kinetix
+                # `pinv_corrected_velocity`): the correction is the TRUE
+                # vector-Jacobian product of the weighted prefix error back
+                # through the denoiser map x_t -> x0_hat. The Jacobian
+                # filters the correction onto the learned action manifold —
+                # the raw identity correction can (and did, 2026-08-22)
+                # carve off-manifold cliffs at the frozen|free seam. Costs
+                # one backward through the unet per step (~2x).
+                abar = abars[t]
+                sqrt_abar = abar.sqrt()
+                sqrt_1m = (1 - abar).sqrt()
+                with torch.enable_grad():
+                    x_in = sample.detach().clone().requires_grad_(True)
+                    eps = self.unet(x_in, t_full, global_cond=global_cond)
+                    x0 = (x_in - sqrt_1m * eps) / sqrt_abar
+                    weights = processor.prefix_weight_vector(
+                        delay, exec_eff, x0.shape[1], row_offset,
+                        device=x0.device, dtype=x0.dtype)
+                    err = (weights * (prefix_target - x0)).detach()
+                    corr = torch.autograd.grad(x0, x_in, grad_outputs=err)[0]
+                w = processor.pinv_guidance_weight(sqrt_abar, device=x0.device,
+                                                  dtype=x0.dtype)
+                x0 = x0.detach() + w * corr
+                model_output = (sample - sqrt_abar * x0) / sqrt_1m
+                sample = self.noise_scheduler.step(
+                    model_output, t, sample, generator=generator).prev_sample
+                continue
             # Predict model output.
-            model_output = self.unet(
-                sample,
-                torch.full(sample.shape[:1], t, dtype=torch.long, device=sample.device),
-                global_cond=global_cond,
-            )
+            model_output = self.unet(sample, t_full, global_cond=global_cond)
+            if guide:
+                # identity-VJP fallback (rtc_guidance_vjp=False): elementwise
+                # x0 nudge, s clamped to 1 (see RTCProcessor.guide_x0).
+                abar = abars[t]
+                sqrt_abar = abar.sqrt()
+                sqrt_1m = (1 - abar).sqrt()
+                x0 = (sample - sqrt_1m * model_output) / sqrt_abar
+                x0 = processor.guide_x0(x0, prefix_target, delay, tau=sqrt_abar,
+                                        execution_horizon=exec_eff,
+                                        row_offset=row_offset)
+                model_output = (sample - sqrt_abar * x0) / sqrt_1m
             # Compute previous image: x_t -> x_t-1
             sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
 
@@ -616,7 +746,8 @@ class DiffusionModel(nn.Module):
         # Concatenate features then flatten to (B, global_cond_dim).
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
 
-    def generate_actions(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+    def generate_actions(self, batch: dict[str, Tensor], noise: Tensor | None = None,
+                         guidance: tuple | None = None) -> Tensor:
         """
         This function expects `batch` to have:
         {
@@ -644,7 +775,8 @@ class DiffusionModel(nn.Module):
                 self.pixel_head(global_cond).view(-1, 2)[-1].detach().cpu().tolist())
 
         # run sampling
-        actions = self.conditional_sample(batch_size, global_cond=global_cond, noise=noise)
+        actions = self.conditional_sample(batch_size, global_cond=global_cond, noise=noise,
+                                          guidance=guidance)
 
         # Extract `n_action_steps` steps worth of actions (from the current observation).
         start = n_obs_steps - 1
