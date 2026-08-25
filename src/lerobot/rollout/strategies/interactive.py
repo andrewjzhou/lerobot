@@ -363,6 +363,24 @@ class InteractiveStrategy(BaseStrategy):
                  plan=np.array(log.get("plan", []), dtype=np.float64),
                  t_abs=np.array(log.get("t_abs", []), dtype=np.float64),
                  interp=np.array(log.get("interp", []), dtype=np.int64))
+        # Per-run dump of the FULL predicted chunks, when the active chunk
+        # tracer can provide them (the cockpit's LiveTracer can). trace.npz
+        # records only which (chunk_seq, plan_row) each control tick came
+        # from; without the chunk bodies you cannot reconstruct what the plan
+        # actually was at a given moment -- which is exactly what you need to
+        # tell a stale overlay from a policy that really is aiming there.
+        n_chunks = 0
+        try:
+            import lerobot.rollout.chunk_trace as _ct
+
+            tr = getattr(_ct, "_tracer", None)
+            t_abs = log.get("t_abs") or []
+            if tr is not None and hasattr(tr, "dump_chunks_npz") and t_abs:
+                n_chunks = tr.dump_chunks_npz(d / "chunks.npz",
+                                              t_lo=float(t_abs[0]) - 1.0,
+                                              t_hi=float(t_abs[-1]) + 1.0)
+        except Exception:
+            logger.exception("chunk dump failed (rollout unaffected)")
         for step, cam, buf in log["frames"]:
             (d / f"{cam}_{step:04d}.jpg").write_bytes(buf)
         (d / "meta.json").write_text(json.dumps({
@@ -371,8 +389,8 @@ class InteractiveStrategy(BaseStrategy):
             "state_keys": log["state_keys"], "action_keys": log["action_keys"],
             "frame_stride": self.config.log_frame_stride,
         }, indent=2))
-        logger.info("debug log written: %s (%d steps, %d frames)",
-                    d, len(log["t"]), len(log["frames"]))
+        logger.info("debug log written: %s (%d steps, %d frames, %d chunks)",
+                    d, len(log["t"]), len(log["frames"]), n_chunks)
 
     def teardown(self, ctx: RolloutContext) -> None:
         try:

@@ -140,15 +140,17 @@ class DiffusionPolicy(PreTrainedPolicy):
         out = 2.0 * (x - lo) / (hi - lo).clamp(min=1e-6) - 1.0
         if self.config.se3_normalize_pos_only:
             # rot6d columns are already bounded to [-1, 1] by construction, so
-            # scaling them buys nothing and breaks the rotation algebra.
-            return torch.cat([out[..., :3], x[..., 3:]], dim=-1)
+            # scaling them buys nothing and breaks the rotation algebra. Dims
+            # 9: (gripper etc.) ARE min-max scaled — UMI range-normalizes
+            # position + gripper and identity-passes only the rotation.
+            return torch.cat([out[..., :3], x[..., 3:9], out[..., 9:]], dim=-1)
         return out
 
     def _se3_unnormalize(self, x: Tensor, key: str) -> Tensor:
         lo, hi = self._se3_stats(key, x)
         out = (x + 1.0) / 2.0 * (hi - lo).clamp(min=1e-6) + lo
         if self.config.se3_normalize_pos_only:
-            return torch.cat([out[..., :3], x[..., 3:]], dim=-1)
+            return torch.cat([out[..., :3], x[..., 3:9], out[..., 9:]], dim=-1)
         return out
 
     def _action_lpf(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -199,10 +201,12 @@ class DiffusionPolicy(PreTrainedPolicy):
         return batch
 
     def _se3_relativize_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
-        """Re-express state (B, To, 9) — and action (B, H, 9) when present —
-        in the frame of the last observation step, then map to network units
-        (per-dim MIN_MAX to [-1, 1] when use_se3_normalize, else the fixed
-        position scale). Returns a shallow copy; stashes the anchor."""
+        """Re-express state (B, To, 9+G) — and action (B, H, 9+G) when
+        present — in the frame of the last observation step, then map to
+        network units (per-dim MIN_MAX to [-1, 1] when use_se3_normalize,
+        else the fixed position scale). Dims 9: (gripper) stay absolute
+        through the relativization (se3.py passes them through). Returns a
+        shallow copy; stashes the anchor."""
         batch = dict(batch)
         state = batch[OBS_STATE]
         anchor = pose9_to_mat(state[:, -1])

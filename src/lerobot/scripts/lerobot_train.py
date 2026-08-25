@@ -97,6 +97,28 @@ def make_train_val_datasets(cfg: TrainPipelineConfig):
     return train_ds, val_ds
 
 
+def prune_checkpoints_keep_top_k(checkpoints_dir, history: dict[str, float], k: int) -> None:
+    """Delete step-checkpoint dirs that are neither in the top-k by val metric
+    (lower = better) nor the NEWEST one (the resume point; also what `last`
+    points at). `history` maps step-identifier -> metric for every val step
+    that had a saved checkpoint. The `best` symlink's target is history's
+    argmin, so it is inside the top-k by construction."""
+    import shutil
+
+    step_dirs = sorted(
+        d for d in checkpoints_dir.iterdir()
+        if d.is_dir() and not d.is_symlink() and d.name.isdigit()
+    )
+    if not step_dirs:
+        return
+    keep = {s for _, s in sorted((m, s) for s, m in history.items())[:k]}
+    keep.add(step_dirs[-1].name)
+    for d in step_dirs:
+        if d.name not in keep:
+            shutil.rmtree(d)
+            logging.info(f"Pruned checkpoint {d.name} (keep_top_k_checkpoints={k})")
+
+
 def run_validation(policy, preprocessor, val_dataset, cfg: TrainPipelineConfig, device):
     """Evaluate the (unwrapped) policy on the held-out episodes.
 
@@ -741,6 +763,17 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                 if best is not None:
                     wandb_val[f"best_{best['key']}"] = best["metric"]
                 wandb_logger.log_dict(wandb_val, step, mode="eval")
+            if cfg.keep_top_k_checkpoints > 0:
+                ckpt_root = cfg.output_dir / "checkpoints"
+                step_id = get_step_identifier(step, cfg.steps)
+                if (ckpt_root / step_id).exists():
+                    hist_path = ckpt_root / "val_history.json"
+                    hist = json.loads(hist_path.read_text()) if hist_path.exists() else {}
+                    hist[step_id] = float(val_metrics[metric_key])
+                    hist_path.write_text(json.dumps(hist, indent=0))
+                    prune_checkpoints_keep_top_k(
+                        ckpt_root, hist, cfg.keep_top_k_checkpoints
+                    )
 
         if cfg.env and is_eval_step:
             if is_main_process:

@@ -4,6 +4,11 @@ Pose layout everywhere: 9D = [x, y, z, rot6d], where rot6d is the FIRST TWO
 COLUMNS of the rotation matrix stacked: [r11, r21, r31, r12, r22, r32].
 This matches the push-box dataset builder (controller/vive_frame.R_to_rot6d)
 and the diffusion_policy fork's trace_dataset convention.
+
+Poses may carry EXTRA dims appended after the 9 (e.g. dim 9 = gripper jaw,
+stack_cup onward). relativize/derelativize transform only the leading 9 and
+pass the rest through untouched — UMI-faithful: the gripper channel is an
+ABSOLUTE width/closure, never re-expressed in the anchor frame.
 """
 
 from __future__ import annotations
@@ -54,15 +59,20 @@ def invert(mat: Tensor) -> Tensor:
 def relativize_window(poses: Tensor, anchor: Tensor) -> Tensor:
     """Re-express a pose window in the anchor's frame.
 
-    poses:  (B, T, 9) absolute poses.
+    poses:  (B, T, 9+G) absolute poses (G >= 0 extra pass-through dims).
     anchor: (B, 4, 4) absolute pose of the anchor step.
-    Returns (B, T, 9) with the anchor step mapped to identity
-    ([0,0,0, 1,0,0, 0,1,0]).
+    Returns (B, T, 9+G) with the anchor step's pose mapped to identity
+    ([0,0,0, 1,0,0, 0,1,0]) and dims 9: passed through untouched.
     """
-    rel = invert(anchor).unsqueeze(1) @ pose9_to_mat(poses)
-    return mat_to_pose9(rel)
+    rel = mat_to_pose9(invert(anchor).unsqueeze(1) @ pose9_to_mat(poses))
+    if poses.shape[-1] > 9:
+        rel = torch.cat([rel, poses[..., 9:]], dim=-1)
+    return rel
 
 
 def derelativize_window(rel_poses: Tensor, anchor: Tensor) -> Tensor:
-    """Inverse of relativize_window: rel (B, T, 9) + anchor (B, 4, 4) -> abs."""
-    return mat_to_pose9(anchor.unsqueeze(1) @ pose9_to_mat(rel_poses))
+    """Inverse of relativize_window: rel (B, T, 9+G) + anchor (B, 4, 4) -> abs."""
+    out = mat_to_pose9(anchor.unsqueeze(1) @ pose9_to_mat(rel_poses))
+    if rel_poses.shape[-1] > 9:
+        out = torch.cat([out, rel_poses[..., 9:]], dim=-1)
+    return out

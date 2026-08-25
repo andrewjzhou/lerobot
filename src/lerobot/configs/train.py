@@ -121,6 +121,11 @@ class TrainPipelineConfig(HubMixin):
     # Fixed RNG seed for the val batch selection and noise/timestep draws, so
     # the val curve is comparable across steps instead of drowning in noise.
     val_seed: int = 1234
+    # Keep only the K best checkpoints by the val metric, PLUS the newest one
+    # (resume point). 0 = keep everything. Pruning runs after each val step,
+    # so it needs val_episode_stride > 0 and val_freq aligned with save_freq;
+    # metric history survives in checkpoints/val_history.json.
+    keep_top_k_checkpoints: int = 0
     use_policy_training_preset: bool = True
     optimizer: OptimizerConfig | None = None
     scheduler: LRSchedulerConfig | None = None

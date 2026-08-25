@@ -144,7 +144,10 @@ class DiffusionConfig(PreTrainedConfig):
     # carry velocity information, and actions are SE(3) transforms w.r.t.
     # the anchor (UMI's "relative trajectory"). Makes the policy invariant
     # to the world/tracking frame — no train/rollout frame calibration.
-    # Requires: observation.state and action are both 9D [xyz + rot6d cols].
+    # Requires: observation.state and action are both 9D [xyz + rot6d cols],
+    # optionally + extra ABSOLUTE dims appended after the 9 (dim 9 = gripper
+    # jaw, stack_cup onward) which pass through the relativization untouched
+    # and are min-max normalized like position when se3_normalize_pos_only.
     # The transform runs INSIDE the model on raw (unnormalized) poses — the
     # processor pipeline skips normalization for these two keys, and
     # positions are scaled by 1/se3_pos_scale in place of dataset stats
@@ -445,10 +448,11 @@ class DiffusionConfig(PreTrainedConfig):
         if self.use_se3_relative:
             state_dim = self.robot_state_feature.shape[0] if self.robot_state_feature else None
             action_dim = self.action_feature.shape[0] if self.action_feature else None
-            if state_dim != 9 or action_dim != 9:
+            if state_dim is None or state_dim < 9 or state_dim != action_dim:
                 raise ValueError(
-                    "`use_se3_relative` requires 9D [xyz + rot6d] observation.state "
-                    f"and action. Got state={state_dim}, action={action_dim}."
+                    "`use_se3_relative` requires observation.state and action to both be "
+                    "9D [xyz + rot6d] (+ optional extra absolute dims, e.g. dim 9 = "
+                    f"gripper). Got state={state_dim}, action={action_dim}."
                 )
 
         if self.resize_shape is None and self.crop_shape is not None:
